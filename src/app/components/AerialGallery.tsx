@@ -56,8 +56,9 @@ export function AerialGallery({
     polygon: Array<[number, number]>;
   } | null>(null);
 
-  // Sort order
-  const [sortMode, setSortMode] = useState<"original" | "newestFirst">("original");
+  // Sort order — newest first by default: those aerials are sharper and easier to
+  // mark manually; the resulting polygon then overlays cleanly onto older pages.
+  const [sortMode, setSortMode] = useState<"original" | "newestFirst">("newestFirst");
 
   const cancelRef = useRef(false);
   const tilesRef = useRef<Tile[]>([]);
@@ -74,7 +75,7 @@ export function AerialGallery({
     setSelected(new Set());
     setSelectMode(false);
     setLastSaved(null);
-    setSortMode("original");
+    setSortMode("newestFirst");
     if (!file) return;
     setRenderBusy(true);
 
@@ -298,24 +299,27 @@ export function AerialGallery({
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <VisionModelPicker value={model} onChange={setModel} disabled={renderBusy} compact />
-          <div className="inline-flex h-9 rounded-full border border-border bg-card p-0.5 text-[11px]">
-            <button
-              onClick={() => setSortMode("original")}
-              className={`rounded-full px-3 transition-colors ${
-                sortMode === "original" ? "bg-brand text-white" : "text-muted hover:text-foreground"
-              }`}
-              title="PDF original order"
-            >
-              Oldest first
-            </button>
+          <div
+            className="inline-flex h-9 rounded-full border border-border bg-card p-0.5 text-[11px]"
+            title="Default is newest first — those aerials are the sharpest, easiest to mark manually, and the polygon you decide on overlays cleanly onto older pages"
+          >
             <button
               onClick={() => setSortMode("newestFirst")}
               className={`rounded-full px-3 transition-colors ${
                 sortMode === "newestFirst" ? "bg-brand text-white" : "text-muted hover:text-foreground"
               }`}
-              title="Reverse: last PDF page (likely most recent aerial) first"
+              title="Most recent aerial first — recommended for the carry-forward workflow"
             >
               Newest first
+            </button>
+            <button
+              onClick={() => setSortMode("original")}
+              className={`rounded-full px-3 transition-colors ${
+                sortMode === "original" ? "bg-brand text-white" : "text-muted hover:text-foreground"
+              }`}
+              title="PDF original order (oldest aerial first)"
+            >
+              Oldest first
             </button>
           </div>
           {!selectMode ? (

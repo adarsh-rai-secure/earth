@@ -187,17 +187,10 @@ export default function AssessmentsPage() {
               <div className="text-xs font-semibold uppercase tracking-wider text-muted">
                 Map view
               </div>
-              <div className="inline-flex rounded-full border border-border bg-card p-0.5 text-[11px]">
-                <button
-                  onClick={() => setTileType("standard")}
-                  className={`rounded-full px-3 py-1 transition-colors ${
-                    tileType === "standard"
-                      ? "bg-brand text-white"
-                      : "text-muted hover:text-foreground"
-                  }`}
-                >
-                  Standard
-                </button>
+              <div
+                className="inline-flex rounded-full border border-border bg-card p-0.5 text-[11px]"
+                title="Satellite gives the vision model an aerial-style reference that matches the historical photos. Standard is useful when street labels and outlines help you confirm the right parcel."
+              >
                 <button
                   onClick={() => setTileType("satellite")}
                   className={`rounded-full px-3 py-1 transition-colors ${
@@ -207,6 +200,16 @@ export default function AssessmentsPage() {
                   }`}
                 >
                   Satellite
+                </button>
+                <button
+                  onClick={() => setTileType("standard")}
+                  className={`rounded-full px-3 py-1 transition-colors ${
+                    tileType === "standard"
+                      ? "bg-brand text-white"
+                      : "text-muted hover:text-foreground"
+                  }`}
+                >
+                  Standard
                 </button>
               </div>
             </div>
