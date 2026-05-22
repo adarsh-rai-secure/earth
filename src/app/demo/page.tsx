@@ -3,6 +3,8 @@
 import { useState } from "react";
 import { ProcessingStatus, type PipelineStage } from "@/app/components/ProcessingStatus";
 import { ReportViewer, type Report } from "@/app/components/ReportViewer";
+import { ModelPicker } from "@/app/components/ModelPicker";
+import { DEFAULT_MODEL_ID } from "@/lib/models";
 
 type Sample = { label: string; description: string; path: string; sizeKb: number };
 
@@ -37,6 +39,7 @@ export default function DemoPage() {
   const [report, setReport] = useState<Report | null>(null);
   const [log, setLog] = useState<RunEntry[]>([]);
   const [running, setRunning] = useState<string | null>(null);
+  const [model, setModel] = useState<string>(DEFAULT_MODEL_ID);
 
   function append(label: string) {
     setLog((l) => [...l, { t: Date.now(), label }]);
@@ -84,11 +87,11 @@ export default function DemoPage() {
       setStage("extracted");
 
       setStage("generating");
-      append("Generating ESA draft (Claude Sonnet 4.5 via OpenRouter)…");
+      append(`Generating ESA draft via OpenRouter (${model})…`);
       const gnRes = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ documentId: upData.documentId }),
+        body: JSON.stringify({ documentId: upData.documentId, model }),
       });
       const gnData = await gnRes.json();
       if (!gnRes.ok) throw new Error(gnData?.error ?? `Generate HTTP ${gnRes.status}`);
@@ -117,6 +120,10 @@ export default function DemoPage() {
           pdf-parse, and asks Claude Sonnet 4.5 (via OpenRouter) for a structured Phase I ESA draft.
           No setup, no uploads — everything below is real.
         </p>
+      </div>
+
+      <div className="mb-6">
+        <ModelPicker value={model} onChange={setModel} disabled={busy} />
       </div>
 
       <div className="mb-6 grid gap-3 md:grid-cols-3">

@@ -4,6 +4,8 @@ import { useState } from "react";
 import { FileUpload, type UploadResult } from "@/app/components/FileUpload";
 import { ProcessingStatus, type PipelineStage } from "@/app/components/ProcessingStatus";
 import { ReportViewer, type Report } from "@/app/components/ReportViewer";
+import { ModelPicker } from "@/app/components/ModelPicker";
+import { DEFAULT_MODEL_ID } from "@/lib/models";
 
 export default function AssessmentsPage() {
   const [doc, setDoc] = useState<UploadResult | null>(null);
@@ -12,6 +14,7 @@ export default function AssessmentsPage() {
   const [report, setReport] = useState<Report | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [model, setModel] = useState<string>(DEFAULT_MODEL_ID);
 
   async function handleUploaded(r: UploadResult) {
     setDoc(r);
@@ -44,7 +47,7 @@ export default function AssessmentsPage() {
       const res = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ documentId: doc.documentId }),
+        body: JSON.stringify({ documentId: doc.documentId, model }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error ?? `HTTP ${res.status}`);
@@ -77,8 +80,15 @@ export default function AssessmentsPage() {
         </p>
       </div>
 
-      <div className="mb-8 rounded-2xl border border-border bg-card p-6">
-        <ProcessingStatus stage={stage} error={err} />
+      <div className="mb-6 grid gap-4 md:grid-cols-[1fr_320px]">
+        <div className="rounded-2xl border border-border bg-card p-6">
+          <ProcessingStatus stage={stage} error={err} />
+        </div>
+        <ModelPicker
+          value={model}
+          onChange={setModel}
+          disabled={busy || stage === "generating"}
+        />
       </div>
 
       {!doc ? (

@@ -1,14 +1,10 @@
-import { PDFParse } from "pdf-parse";
+// pdf-parse v1.x — import the inner file to skip the package's index.js debug-mode block
+// (the index.js tries to read a test PDF on load, which fails on serverless)
+import pdf from "pdf-parse/lib/pdf-parse.js";
 
 export async function extractTextFromBuffer(buffer: Buffer): Promise<string> {
-  const data = new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
-  const parser = new PDFParse({ data });
-  try {
-    const result = await parser.getText();
-    return result.text ?? "";
-  } finally {
-    await parser.destroy().catch(() => {});
-  }
+  const result = await pdf(buffer);
+  return result.text ?? "";
 }
 
 export async function extractTextFromBlob(blob: Blob): Promise<string> {
@@ -17,11 +13,8 @@ export async function extractTextFromBlob(blob: Blob): Promise<string> {
 }
 
 export async function extractTextFromURL(fileUrl: string): Promise<string> {
-  const parser = new PDFParse({ url: fileUrl });
-  try {
-    const result = await parser.getText();
-    return result.text ?? "";
-  } finally {
-    await parser.destroy().catch(() => {});
-  }
+  const res = await fetch(fileUrl);
+  if (!res.ok) throw new Error(`Failed to fetch file: ${res.status} ${res.statusText}`);
+  const ab = await res.arrayBuffer();
+  return extractTextFromBuffer(Buffer.from(ab));
 }
