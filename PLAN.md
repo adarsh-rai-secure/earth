@@ -46,35 +46,19 @@ Schema decision left to builder: **either** add `projects` + `aerial_pages` tabl
 
 **Phase 1 demo checkpoint:** type an address → see the parcel polygon on a Leaflet map. Push, deploy, screenshot.
 
-### Phase 2 — PDF Upload + Side-by-Side Gallery (20 min)
-- [ ] `npm install pdfjs-dist @napi-rs/canvas` for server-side rasterization
-- [ ] `src/lib/rasterize.ts` → `rasterizePdfPages(buffer, opts?: { dpi?: number })` returns `{ pageIndex, png, width, height }[]`. Cap DPI 150.
-- [ ] Add table:
-  ```sql
-  CREATE TABLE IF NOT EXISTS aerial_pages (
-    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-    document_id UUID REFERENCES documents(id) ON DELETE CASCADE,
-    page_index INT NOT NULL,
-    original_path TEXT NOT NULL,
-    marked_path TEXT,
-    width INT,
-    height INT,
-    overlay_polygon JSONB,
-    status TEXT DEFAULT 'rasterized',
-    created_at TIMESTAMPTZ DEFAULT now(),
-    UNIQUE(document_id, page_index)
-  );
-  ALTER PUBLICATION supabase_realtime ADD TABLE aerial_pages;
-  ALTER TABLE aerial_pages ENABLE ROW LEVEL SECURITY;
-  CREATE POLICY "demo_aerial_pages_all" ON aerial_pages FOR ALL USING (true) WITH CHECK (true);
-  ```
-- [ ] Add columns to `assessments`: `address TEXT`, `parcel_geojson JSONB`, `parcel_apn TEXT`, `parcel_lat DOUBLE PRECISION`, `parcel_lng DOUBLE PRECISION` (use `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`).
-- [ ] Modify [src/app/api/extract/route.ts](src/app/api/extract/route.ts) to **also** rasterize each page, upload to `uploads/<docId>/page-<n>.png`, insert `aerial_pages` rows.
-- [ ] `src/app/api/pages/route.ts` — GET `?documentId=...` → returns `aerial_pages` rows with signed URLs.
-- [ ] `src/app/components/AerialGallery.tsx` — grid of pages. Each tile = aerial PNG on left, mini Regrid map on right (or shared global map). Per-tile "Download PNG" button (just `<a download>` to the signed URL).
-- [ ] Plumb in [src/app/assessments/page.tsx](src/app/assessments/page.tsx) below the upload zone. After upload + extract, gallery populates.
+### Phase 2 — Client-side Aerial Gallery (15 min)
 
-**Phase 2 demo checkpoint:** address → parcel map → upload PDF → 19 tiles render with parcel map alongside, each downloadable. Push, deploy.
+**Architecture change locked 2026-05-22:** rasterization happens entirely **in the browser** via `pdfjs-dist`. No upload, no server route, no `aerial_pages` table, no schema changes. PDF stays in browser memory until user closes the tab.
+
+- [x] `npm install pdfjs-dist`
+- [x] `src/lib/pdf-render.ts` (client-only) — `renderPdfToCanvases(file: File, opts?: { dpi?: number }): AsyncGenerator<{ pageIndex: number; canvas: HTMLCanvasElement; width: number; height: number }>`. Default DPI 96 with optional 150 toggle. Uses dynamic `import("pdfjs-dist")` so it never lands in the server bundle.
+- [x] Worker setup: **Option B** chosen — `GlobalWorkerOptions.workerSrc = "https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs"`. Picked over Option A because Turbopack `?url` import handling is still flaky in Next 16 and unpkg version-pinning is bulletproof for the demo.
+- [x] `src/app/components/AerialGallery.tsx` — `'use client'`, accepts `file: File | null` prop. Pre-allocates tile slots based on `getPageCount`, fills each tile incrementally as the async generator yields. Per-tile "Download PNG" + "Download all PNGs" button. Download uses `dataUrl` + programmatic `<a download>` click (canvas.toBlob ergonomics are fine but data URLs avoid the blob URL lifecycle on this hot path).
+- [ ] Lazy render: only render a page's canvas when its tile enters the viewport (IntersectionObserver) so a 19-page PDF doesn't allocate ~100 MB of pixels upfront. **Deferred.** Current implementation renders pages sequentially at DPI 100 and stores dataURLs in state, not live canvases — much lower memory footprint than the original plan assumption. If we see lag on the 19-page test fixture, revisit.
+- [x] Wire into [src/app/assessments/page.tsx](src/app/assessments/page.tsx) Section 2 ("Supporting documents"): when a PDF is selected, hold the `File` in component state and pass it to `AerialGallery`. The existing `/api/upload` + `/api/extract` text flow continues to run in parallel for the ESA-report path; the gallery just shares the same `File` ref, no extra upload. [FileUpload](src/app/components/FileUpload.tsx) now exposes an optional `onFile` callback that fires before the POST so the gallery and the upload run in parallel.
+- [x] No DB changes. No new API routes. No Supabase storage writes for the boundary flow.
+
+**Phase 2 demo checkpoint:** address → parcel map → drop PDF → 19 tiles render in-browser within ~10 sec, each with a working Download PNG. No network calls beyond the initial Regrid lookup. Push, deploy.
 
 ## Future Roadmap
 
@@ -88,17 +72,14 @@ Out of scope for this build, lined up for the next sprint:
 
 ## Data Model Changes
 
-- New `aerial_pages` table (see Phase 2 SQL).
-- `assessments` gets 5 new columns (`address`, `parcel_geojson`, `parcel_apn`, `parcel_lat`, `parcel_lng`).
-- No changes to `documents` table.
+**None for Phase 1+2.** Client-side rasterization removed the need for `aerial_pages` and the column additions to `assessments`. Persistence of the parcel lookup is also deferred — `/api/parcel` currently returns to the client without DB write, which is fine for the demo. If we later want persistence (refresh-survives state), add `address`, `parcel_geojson`, `parcel_apn`, `parcel_lat`, `parcel_lng` to `assessments` then.
 
 ## API Changes
 
 | Route | Phase | Purpose |
 |---|---|---|
-| `/api/parcel` | 1 | address → geocode → Regrid → write to `assessments` |
-| `/api/extract` | 2 (modified) | also rasterizes pages → `aerial_pages` rows |
-| `/api/pages` | 2 | list pages with signed PNG URLs for the gallery |
+| `/api/parcel` | 1 | address → geocode → Regrid → return parcel (no DB persist in this build) |
+| `/api/extract` | unchanged | existing ESA text flow — not touched by boundary tool |
 
 ## UI Changes
 
@@ -110,16 +91,16 @@ Out of scope for this build, lined up for the next sprint:
 ## Dependencies to Install
 
 ```bash
-# Phase 1
+# Phase 1 (done)
 npm install leaflet react-leaflet
 
-# Phase 2
-npm install pdfjs-dist @napi-rs/canvas
+# Phase 2 (client-side only)
+npm install pdfjs-dist
 ```
 
 ## Risk / Open Questions
 
-1. **PDF rasterization on Vercel** — `pdfjs-dist` + `@napi-rs/canvas` together can push the bundle past Vercel's 50 MB serverless limit. If it breaks: fall back to client-side rendering with `react-pdf` (render in-browser, upload PNGs from the client) or push rasterization to a single dedicated route with the Node runtime and lazy imports. **Validate within first 5 min of Phase 2.**
+1. **`pdfjs-dist` worker config** — with Next.js 16 + Turbopack, `?url` worker imports work but require the dep version pinned. If worker initialization fails at runtime ("UnknownErrorException: Setting up fake worker failed"), fall back to the CDN URL form. **Validate within first 5 min of Phase 2.**
 2. **Nominatim rate limit** — free tier is 1 req/sec, must include `User-Agent`. For one-off demo lookups this is fine.
 3. **`react-leaflet` SSR** — Leaflet touches `window` on import. Must use `next/dynamic` with `ssr: false` for `ParcelMap`.
 4. **Address mismatch** — if Nominatim geocodes to the wrong place, Regrid returns a wrong parcel. Mitigation: show the geocoded address in the UI ("Found: 123 Main St, City, ST") and a "wrong address?" link that re-runs with a more specific query.

@@ -7,6 +7,7 @@ import { ProcessingStatus, type PipelineStage } from "@/app/components/Processin
 import { ReportViewer, type Report } from "@/app/components/ReportViewer";
 import { ModelPicker } from "@/app/components/ModelPicker";
 import { AddressInput, type ParcelLookupResult } from "@/app/components/AddressInput";
+import { AerialGallery } from "@/app/components/AerialGallery";
 import { DEFAULT_MODEL_ID } from "@/lib/models";
 
 const ParcelMap = dynamic(() => import("@/app/components/ParcelMap"), {
@@ -27,6 +28,7 @@ export default function AssessmentsPage() {
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [model, setModel] = useState<string>(DEFAULT_MODEL_ID);
+  const [aerialFile, setAerialFile] = useState<File | null>(null);
 
   async function handleUploaded(r: UploadResult) {
     setDoc(r);
@@ -79,6 +81,7 @@ export default function AssessmentsPage() {
     setTextPreview(null);
     setReport(null);
     setErr(null);
+    setAerialFile(null);
   }
 
   return (
@@ -147,7 +150,7 @@ export default function AssessmentsPage() {
         </div>
 
         {!doc ? (
-          <FileUpload onUploaded={handleUploaded} />
+          <FileUpload onUploaded={handleUploaded} onFile={setAerialFile} />
         ) : (
           <div className="space-y-6">
             <div className="flex items-center justify-between rounded-2xl border border-border bg-card p-4">
@@ -162,6 +165,8 @@ export default function AssessmentsPage() {
                 Reset
               </button>
             </div>
+
+            {aerialFile && <AerialGallery file={aerialFile} baseFilename={doc.filename} />}
 
             {textPreview && (
               <details className="rounded-2xl border border-border bg-card p-4 text-sm">

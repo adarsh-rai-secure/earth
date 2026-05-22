@@ -4,7 +4,13 @@ import { useCallback, useRef, useState } from "react";
 
 export type UploadResult = { documentId: string; filename: string; fileUrl: string; status: string };
 
-export function FileUpload({ onUploaded }: { onUploaded: (r: UploadResult) => void }) {
+export function FileUpload({
+  onUploaded,
+  onFile,
+}: {
+  onUploaded: (r: UploadResult) => void;
+  onFile?: (file: File) => void;
+}) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -12,6 +18,7 @@ export function FileUpload({ onUploaded }: { onUploaded: (r: UploadResult) => vo
 
   const upload = useCallback(
     async (file: File) => {
+      onFile?.(file);
       setBusy(true);
       setErr(null);
       try {
@@ -27,7 +34,7 @@ export function FileUpload({ onUploaded }: { onUploaded: (r: UploadResult) => vo
         setBusy(false);
       }
     },
-    [onUploaded]
+    [onUploaded, onFile]
   );
 
   return (
