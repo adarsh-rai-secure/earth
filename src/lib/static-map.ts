@@ -1,9 +1,8 @@
-// Server-side static map renderer: OSM tile fetch + sharp composite + polygon overlay.
-// Used by /api/reference to produce a "this is the parcel shape" image we can pass
-// to Claude vision as a second image input for shape-matching.
+// Server-side static map renderer: tile fetch + sharp composite + polygon overlay.
 
 import sharp from "sharp";
 import type { Feature, MultiPolygon, Polygon, Position } from "geojson";
+import { TILE_SOURCES, tileUrl, type TileType } from "@/lib/map-tiles";
 
 const TILE_SIZE = 256;
 
@@ -24,7 +23,12 @@ function flattenRings(geom: Polygon | MultiPolygon): Position[][] {
   return (geom.coordinates as Position[][][]).flatMap((poly) => poly);
 }
 
-function polygonBounds(geom: Polygon | MultiPolygon): { minLat: number; maxLat: number; minLng: number; maxLng: number } {
+function polygonBounds(geom: Polygon | MultiPolygon): {
+  minLat: number;
+  maxLat: number;
+  minLng: number;
+  maxLng: number;
+} {
   let minLat = Infinity,
     maxLat = -Infinity,
     minLng = Infinity,
@@ -40,8 +44,6 @@ function polygonBounds(geom: Polygon | MultiPolygon): { minLat: number; maxLat: 
   return { minLat, maxLat, minLng, maxLng };
 }
 
-// Pick the smallest zoom that still fits the polygon inside a given pixel size
-// with reasonable padding.
 function pickZoom(b: ReturnType<typeof polygonBounds>, targetPx: number): number {
   for (let z = 19; z >= 10; z--) {
     const px = (lng2x(b.maxLng, z) - lng2x(b.minLng, z)) * TILE_SIZE;
@@ -52,47 +54,48 @@ function pickZoom(b: ReturnType<typeof polygonBounds>, targetPx: number): number
   return 17;
 }
 
-async function fetchTile(z: number, x: number, y: number): Promise<Buffer> {
-  const sub = ["a", "b", "c"][((x + y) % 3 + 3) % 3];
-  const url = `https://${sub}.tile.openstreetmap.org/${z}/${x}/${y}.png`;
-  const res = await fetch(url, { headers: { "User-Agent": "earth-amaearth-build/1.0 (https://earth-rouge.vercel.app)" } });
-  if (!res.ok) throw new Error(`OSM tile ${z}/${x}/${y} HTTP ${res.status}`);
+async function fetchTile(source: ReturnType<typeof getSource>, z: number, x: number, y: number): Promise<Buffer> {
+  const url = tileUrl(source, z, x, y);
+  const res = await fetch(url, {
+    headers: { "User-Agent": "earth-amaearth-build/1.0 (https://earth-rouge.vercel.app)" },
+  });
+  if (!res.ok) throw new Error(`Tile fetch ${url} HTTP ${res.status}`);
   return Buffer.from(await res.arrayBuffer());
+}
+
+function getSource(tileType: TileType) {
+  return TILE_SOURCES[tileType] ?? TILE_SOURCES.standard;
 }
 
 export async function renderReferenceImage(
   parcel: Feature<Polygon | MultiPolygon>,
-  outSize = 640
-): Promise<{ dataUrl: string; zoom: number; centerLat: number; centerLng: number }> {
+  outSize = 640,
+  tileType: TileType = "standard"
+): Promise<{ dataUrl: string; zoom: number; centerLat: number; centerLng: number; tileType: TileType }> {
+  const source = getSource(tileType);
   const b = polygonBounds(parcel.geometry);
   const centerLat = (b.minLat + b.maxLat) / 2;
   const centerLng = (b.minLng + b.maxLng) / 2;
   const z = pickZoom(b, outSize);
 
-  // Compute the pixel position of the polygon center in world-pixel space at zoom z.
   const centerWX = lng2x(centerLng, z) * TILE_SIZE;
   const centerWY = lat2y(centerLat, z) * TILE_SIZE;
-
-  // Top-left world-pixel of the output canvas (centered on the polygon center).
   const tlWX = centerWX - outSize / 2;
   const tlWY = centerWY - outSize / 2;
 
-  // Tile range that covers the output area.
   const tileMinX = Math.floor(tlWX / TILE_SIZE);
   const tileMaxX = Math.floor((tlWX + outSize) / TILE_SIZE);
   const tileMinY = Math.floor(tlWY / TILE_SIZE);
   const tileMaxY = Math.floor((tlWY + outSize) / TILE_SIZE);
 
-  // Fetch tiles in parallel.
   const tilePromises: Promise<{ x: number; y: number; buf: Buffer }>[] = [];
   for (let tx = tileMinX; tx <= tileMaxX; tx++) {
     for (let ty = tileMinY; ty <= tileMaxY; ty++) {
-      tilePromises.push(fetchTile(z, tx, ty).then((buf) => ({ x: tx, y: ty, buf })));
+      tilePromises.push(fetchTile(source, z, tx, ty).then((buf) => ({ x: tx, y: ty, buf })));
     }
   }
   const tiles = await Promise.all(tilePromises);
 
-  // Compose tiles onto a canvas the size of the tile grid, then crop.
   const gridW = (tileMaxX - tileMinX + 1) * TILE_SIZE;
   const gridH = (tileMaxY - tileMinY + 1) * TILE_SIZE;
 
@@ -102,7 +105,6 @@ export async function renderReferenceImage(
     top: (y - tileMinY) * TILE_SIZE,
   }));
 
-  // Project polygon to pixel coords within the cropped output (relative to tlWX/tlWY).
   function projectXY([lng, lat]: Position): [number, number] {
     const wx = lng2x(lng, z) * TILE_SIZE;
     const wy = lat2y(lat, z) * TILE_SIZE;
@@ -122,7 +124,6 @@ export async function renderReferenceImage(
 
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${outSize}" height="${outSize}" viewBox="0 0 ${outSize} ${outSize}">${svgPaths}</svg>`;
 
-  // Crop offset from the tile grid to the output window.
   const cropLeft = Math.round(tlWX - tileMinX * TILE_SIZE);
   const cropTop = Math.round(tlWY - tileMinY * TILE_SIZE);
 
@@ -140,5 +141,5 @@ export async function renderReferenceImage(
     .toBuffer();
 
   const dataUrl = `data:image/png;base64,${cropped.toString("base64")}`;
-  return { dataUrl, zoom: z, centerLat, centerLng };
+  return { dataUrl, zoom: z, centerLat, centerLng, tileType };
 }

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import { AddressInput, type ParcelLookupResult } from "@/app/components/AddressInput";
 import { AerialGallery } from "@/app/components/AerialGallery";
+import type { TileType } from "@/lib/map-tiles";
 
 const ParcelMap = dynamic(() => import("@/app/components/ParcelMap"), {
   ssr: false,
@@ -24,6 +25,7 @@ export default function AssessmentsPage() {
   const [referenceImage, setReferenceImage] = useState<string | null>(null);
   const [confirmBusy, setConfirmBusy] = useState(false);
   const [confirmErr, setConfirmErr] = useState<string | null>(null);
+  const [tileType, setTileType] = useState<TileType>("standard");
   const [dragging, setDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dropZoneRef = useRef<HTMLDivElement>(null);
@@ -60,7 +62,7 @@ export default function AssessmentsPage() {
     void lookupAddress(top);
   }, [pdfCandidates, parcel, lookupBusy, autoLookupTriedFor, lookupAddress]);
 
-  const confirmParcel = useCallback(async () => {
+  const takeReferenceSnapshot = useCallback(async () => {
     if (!parcel || confirmBusy) return;
     setConfirmBusy(true);
     setConfirmErr(null);
@@ -68,7 +70,7 @@ export default function AssessmentsPage() {
       const res = await fetch("/api/reference", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ parcel: parcel.parcel, size: 640 }),
+        body: JSON.stringify({ parcel: parcel.parcel, size: 640, tileType }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error ?? `HTTP ${res.status}`);
@@ -78,7 +80,12 @@ export default function AssessmentsPage() {
     } finally {
       setConfirmBusy(false);
     }
-  }, [parcel, confirmBusy]);
+  }, [parcel, confirmBusy, tileType]);
+
+  const deleteReference = useCallback(() => {
+    setReferenceImage(null);
+    setConfirmErr(null);
+  }, []);
 
   function pickFile(f: File | undefined | null) {
     if (!f) return;
@@ -101,9 +108,8 @@ export default function AssessmentsPage() {
           Parcel boundary &amp; aerial timeline
         </h1>
         <p className="mt-2 text-sm text-muted">
-          Type an address, or drop a multi-page aerial PDF and let us pull the address from it.
-          Confirm the property boundaries, then have a vision model draw the parcel onto each
-          aerial. Click any tile to open the page editor.
+          Type an address (or drop a PDF for auto-fill), pick a map view, confirm the parcel
+          boundary, then select aerials and walk through each one in the page editor.
         </p>
       </div>
 
@@ -132,7 +138,6 @@ export default function AssessmentsPage() {
             <button
               onClick={triggerPdfPicker}
               className="inline-flex w-full items-center justify-center gap-2 rounded-full border border-dashed border-border bg-card px-4 py-2 text-xs font-medium text-muted hover:border-brand hover:text-brand"
-              title="Open the PDF picker; we'll pull the subject address from the document text"
             >
               <span aria-hidden>📄</span>
               Or auto-fill from a PDF
@@ -150,16 +155,12 @@ export default function AssessmentsPage() {
                       onClick={() => lookupAddress(c)}
                       disabled={lookupBusy}
                       className="inline-flex max-w-full items-center gap-1 rounded-full border border-border bg-background px-3 py-1 text-[11px] hover:border-brand hover:text-brand disabled:opacity-60"
-                      title={`Use this address from the PDF: ${c}`}
                     >
                       <span className="truncate">{c}</span>
                       <span aria-hidden>→</span>
                     </button>
                   ))}
                 </div>
-                <p className="mt-2 text-[11px] text-muted">
-                  Top candidate auto-loaded when you dropped the PDF. Click another to switch.
-                </p>
               </div>
             )}
 
@@ -182,46 +183,83 @@ export default function AssessmentsPage() {
           </div>
 
           <div className="space-y-3">
-            <ParcelMap parcel={parcel?.parcel ?? null} centroid={parcel?.centroid ?? null} />
+            <div className="flex items-center justify-between gap-3">
+              <div className="text-xs font-semibold uppercase tracking-wider text-muted">
+                Map view
+              </div>
+              <div className="inline-flex rounded-full border border-border bg-card p-0.5 text-[11px]">
+                <button
+                  onClick={() => setTileType("standard")}
+                  className={`rounded-full px-3 py-1 transition-colors ${
+                    tileType === "standard"
+                      ? "bg-brand text-white"
+                      : "text-muted hover:text-foreground"
+                  }`}
+                >
+                  Standard
+                </button>
+                <button
+                  onClick={() => setTileType("satellite")}
+                  className={`rounded-full px-3 py-1 transition-colors ${
+                    tileType === "satellite"
+                      ? "bg-brand text-white"
+                      : "text-muted hover:text-foreground"
+                  }`}
+                >
+                  Satellite
+                </button>
+              </div>
+            </div>
+
+            <ParcelMap
+              parcel={parcel?.parcel ?? null}
+              centroid={parcel?.centroid ?? null}
+              tileType={tileType}
+            />
 
             {parcel && (
               <div className="rounded-2xl border border-border bg-card p-4">
-                <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>
                     <div className="text-xs font-semibold uppercase tracking-wider text-muted">
                       Property boundaries
                     </div>
                     <p className="mt-1 max-w-md text-[12px] leading-5 text-muted">
-                      Lock in this parcel and save the Regrid view as a reference image. The vision
+                      Take a snapshot of the current map view as a reference image. The vision
                       model uses it to find the same shape in each aerial.
                     </p>
                   </div>
-                  <div className="flex items-center gap-2">
-                    {referenceImage && (
-                      <span className="inline-flex h-7 items-center gap-1 rounded-full bg-success/15 px-3 text-[10px] font-semibold text-brand">
-                        ✓ Confirmed
-                      </span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {!referenceImage ? (
+                      <button
+                        onClick={takeReferenceSnapshot}
+                        disabled={confirmBusy}
+                        className="inline-flex h-9 items-center rounded-full bg-brand px-4 text-xs font-medium text-white hover:bg-brand-hover disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        {confirmBusy ? "Rendering…" : "📸 Take reference snapshot"}
+                      </button>
+                    ) : (
+                      <>
+                        <span className="inline-flex h-7 items-center gap-1 rounded-full bg-success/15 px-3 text-[10px] font-semibold text-brand">
+                          ✓ Snapshot saved ({tileType})
+                        </span>
+                        <button
+                          onClick={takeReferenceSnapshot}
+                          disabled={confirmBusy}
+                          className="inline-flex h-9 items-center rounded-full border border-border bg-background px-3 text-xs font-medium hover:border-brand hover:text-brand disabled:opacity-60"
+                          title="Re-render with current map view selection"
+                        >
+                          ↻ Retake
+                        </button>
+                        <button
+                          onClick={deleteReference}
+                          className="inline-flex h-9 items-center rounded-full border border-error/40 bg-background px-3 text-xs font-medium text-error hover:bg-error/10"
+                          title="Delete the snapshot and take a new one"
+                        >
+                          🗑 Delete
+                        </button>
+                      </>
                     )}
-                    <button
-                      onClick={confirmParcel}
-                      disabled={confirmBusy}
-                      className={`inline-flex h-9 items-center rounded-full px-4 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-60 ${
-                        referenceImage
-                          ? "border border-border bg-background text-foreground hover:border-brand hover:text-brand"
-                          : "bg-brand text-white hover:bg-brand-hover"
-                      }`}
-                      title={
-                        referenceImage
-                          ? "Re-render the reference image (useful if you changed the parcel)"
-                          : "Save the Regrid view as a reference image"
-                      }
-                    >
-                      {confirmBusy
-                        ? "Rendering…"
-                        : referenceImage
-                          ? "↻ Regenerate reference"
-                          : "Confirm property boundaries"}
-                    </button>
                   </div>
                 </div>
                 {confirmErr && <p className="mt-2 text-[11px] text-error">{confirmErr}</p>}
@@ -302,7 +340,7 @@ export default function AssessmentsPage() {
               </div>
               {parcel && !referenceImage && (
                 <span className="rounded-full bg-warn/15 px-3 py-1 text-[11px] text-warn">
-                  Confirm property boundaries above for higher-quality marking
+                  Take a reference snapshot above for higher-quality marking
                 </span>
               )}
               {referenceImage && (

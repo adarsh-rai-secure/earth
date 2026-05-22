@@ -6,7 +6,7 @@ import { VisionModelPicker } from "@/app/components/VisionModelPicker";
 import type { ParcelLookupResult } from "@/app/components/AddressInput";
 
 const MARK_INPUT_MAX_SIDE = 1024;
-const VERTEX_HIT_RADIUS = 0.025; // normalized
+const VERTEX_HIT_RADIUS = 0.025;
 
 export type EditorTile = {
   pageIndex: number;
@@ -25,8 +25,10 @@ export type EditorTile = {
 export function PageDetailEditor({
   tile,
   totalPages,
+  navigableIndices,
   parcel,
   referenceImageDataUrl,
+  previousMarkedImageDataUrl,
   defaultModel,
   onSave,
   onClose,
@@ -35,16 +37,19 @@ export function PageDetailEditor({
 }: {
   tile: EditorTile;
   totalPages: number;
+  navigableIndices: number[]; // ordered list of page indices the editor cycles through
   parcel: ParcelLookupResult;
   referenceImageDataUrl: string | null;
+  previousMarkedImageDataUrl: string | null;
   defaultModel: string;
-  onSave: (updated: EditorTile) => void;
+  onSave: (updated: EditorTile, wasManual: boolean) => void;
   onClose: () => void;
   onNavigate: (direction: -1 | 1) => void;
   baseFilename?: string;
 }) {
   const [polygon, setPolygon] = useState<Array<[number, number]>>(tile.polygon ?? []);
   const [manualMode, setManualMode] = useState(false);
+  const [usedManualThisSession, setUsedManualThisSession] = useState(false);
   const [model, setModel] = useState(defaultModel);
   const [marking, setMarking] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -61,10 +66,10 @@ export function PageDetailEditor({
     setMark(tile.mark);
     setErr(null);
     setManualMode(false);
+    setUsedManualThisSession(false);
     setDirty(false);
-  }, [tile.pageIndex]); // intentionally ignore changes to tile object identity
+  }, [tile.pageIndex, tile.polygon, tile.mark]);
 
-  // Load image and draw
   useEffect(() => {
     const img = new Image();
     img.onload = () => {
@@ -78,8 +83,6 @@ export function PageDetailEditor({
     const canvas = canvasRef.current;
     const img = imageRef.current;
     if (!canvas || !img) return;
-
-    // Use natural image dimensions; CSS scales it down for display.
     canvas.width = img.naturalWidth;
     canvas.height = img.naturalHeight;
     const ctx = canvas.getContext("2d");
@@ -123,7 +126,6 @@ export function PageDetailEditor({
     drawCanvas();
   }, [drawCanvas]);
 
-  // Canvas mouse handling — all coords normalized 0..1
   const getNormalized = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current!;
     const rect = canvas.getBoundingClientRect();
@@ -146,16 +148,15 @@ export function PageDetailEditor({
           nearestIdx = i;
         }
       });
-
       if (nearestIdx >= 0) {
         if (e.shiftKey) {
           setPolygon((prev) => prev.filter((_, i) => i !== nearestIdx));
           setDirty(true);
+          setUsedManualThisSession(true);
         } else {
           draggingIdx.current = nearestIdx;
         }
       } else {
-        // add new vertex; insert at nearest edge for cleaner polygons when 3+ exist
         if (polygon.length < 3) {
           setPolygon((prev) => [...prev, [x, y]]);
         } else {
@@ -177,6 +178,7 @@ export function PageDetailEditor({
           });
         }
         setDirty(true);
+        setUsedManualThisSession(true);
       }
     },
     [manualMode, polygon, getNormalized]
@@ -187,8 +189,11 @@ export function PageDetailEditor({
       if (draggingIdx.current === null) return;
       const { x, y } = getNormalized(e);
       const idx = draggingIdx.current;
-      setPolygon((prev) => prev.map((p, i) => (i === idx ? [Math.max(0, Math.min(1, x)), Math.max(0, Math.min(1, y))] : p)));
+      setPolygon((prev) =>
+        prev.map((p, i) => (i === idx ? [Math.max(0, Math.min(1, x)), Math.max(0, Math.min(1, y))] : p))
+      );
       setDirty(true);
+      setUsedManualThisSession(true);
     },
     [getNormalized]
   );
@@ -211,6 +216,7 @@ export function PageDetailEditor({
           parcel: parcel.parcel,
           address: parcel.addressNormalized,
           referenceImageDataUrl: referenceImageDataUrl ?? null,
+          previousMarkedImageDataUrl: previousMarkedImageDataUrl ?? null,
           model,
         }),
       });
@@ -233,14 +239,11 @@ export function PageDetailEditor({
   }
 
   async function save() {
-    const markedDataUrl =
-      polygon.length >= 3 ? await composeMarkedDataUrl(tile.rawDataUrl, polygon) : null;
-    onSave({
-      ...tile,
-      polygon,
-      markedDataUrl,
-      mark,
-    });
+    const markedDataUrl = polygon.length >= 3 ? await composeMarkedDataUrl(tile.rawDataUrl, polygon) : null;
+    onSave(
+      { ...tile, polygon, markedDataUrl, mark },
+      usedManualThisSession
+    );
   }
 
   function downloadCurrent() {
@@ -253,29 +256,37 @@ export function PageDetailEditor({
     a.click();
   }
 
+  const positionInSelection = navigableIndices.indexOf(tile.pageIndex);
+  const navTotal = navigableIndices.length;
+  const isFirst = positionInSelection <= 0;
+  const isLast = positionInSelection === -1 || positionInSelection >= navTotal - 1;
+
   return (
     <div className="fixed inset-0 z-50 flex flex-col bg-background/95 backdrop-blur">
       <div className="flex items-center justify-between border-b border-border px-6 py-3">
         <div>
-          <div className="text-xs font-semibold uppercase tracking-wider text-muted">
-            Page editor
-          </div>
+          <div className="text-xs font-semibold uppercase tracking-wider text-muted">Page editor</div>
           <h2 className="text-lg font-semibold">
             Page {tile.pageIndex + 1} of {totalPages}
+            {navTotal !== totalPages && positionInSelection >= 0 && (
+              <span className="ml-2 text-[11px] font-normal text-muted">
+                · {positionInSelection + 1}/{navTotal} selected
+              </span>
+            )}
             {dirty && <span className="ml-2 text-[11px] font-normal text-warn">· unsaved</span>}
           </h2>
         </div>
         <div className="flex items-center gap-2">
           <button
             onClick={() => onNavigate(-1)}
-            disabled={tile.pageIndex === 0}
+            disabled={isFirst}
             className="rounded-full border border-border bg-background px-3 py-1.5 text-xs hover:border-foreground/30 disabled:opacity-40"
           >
             ◀ Prev
           </button>
           <button
             onClick={() => onNavigate(1)}
-            disabled={tile.pageIndex >= totalPages - 1}
+            disabled={isLast}
             className="rounded-full border border-border bg-background px-3 py-1.5 text-xs hover:border-foreground/30 disabled:opacity-40"
           >
             Next ▶
@@ -289,7 +300,43 @@ export function PageDetailEditor({
         </div>
       </div>
 
-      <div className="grid flex-1 grid-cols-1 gap-4 overflow-hidden p-4 md:grid-cols-[1fr_320px]">
+      <div className="grid flex-1 grid-cols-1 gap-4 overflow-hidden p-4 lg:grid-cols-[220px_1fr_320px]">
+        <div className="flex flex-col gap-3 overflow-auto">
+          <div className="rounded-2xl border border-border bg-card p-3">
+            <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">
+              Map reference
+            </div>
+            {referenceImageDataUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={referenceImageDataUrl}
+                alt="Map reference image sent to vision"
+                className="mt-2 w-full rounded-lg border border-border"
+              />
+            ) : (
+              <p className="mt-2 text-[11px] leading-5 text-muted">
+                No reference image. Confirm the parcel back on the main page to enable shape matching.
+              </p>
+            )}
+          </div>
+          {previousMarkedImageDataUrl && (
+            <div className="rounded-2xl border border-border bg-card p-3">
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">
+                Prior confirmed page
+              </div>
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={previousMarkedImageDataUrl}
+                alt="Last saved page used as a second reference"
+                className="mt-2 w-full rounded-lg border border-border"
+              />
+              <p className="mt-2 text-[10px] leading-4 text-muted">
+                Vision will use this as a style/example reference for this page.
+              </p>
+            </div>
+          )}
+        </div>
+
         <div className="relative flex items-center justify-center overflow-auto rounded-2xl border border-border bg-foreground/[0.04]">
           <canvas
             ref={canvasRef}
@@ -342,6 +389,7 @@ export function PageDetailEditor({
                   onClick={() => {
                     setPolygon([]);
                     setDirty(true);
+                    setUsedManualThisSession(true);
                   }}
                   className="mt-2 text-[11px] text-error underline-offset-2 hover:underline"
                 >
@@ -373,16 +421,12 @@ export function PageDetailEditor({
           {tile.pageText && (
             <details className="rounded-lg border border-border bg-card p-3 text-xs">
               <summary className="cursor-pointer font-medium">PDF page text</summary>
-              <p className="mt-2 max-h-40 overflow-auto text-[11px] leading-5 text-muted">
-                {tile.pageText}
-              </p>
+              <p className="mt-2 max-h-40 overflow-auto text-[11px] leading-5 text-muted">{tile.pageText}</p>
             </details>
           )}
 
           {err && (
-            <div className="rounded-lg border border-error/40 bg-error/10 p-3 text-[11px] text-error">
-              {err}
-            </div>
+            <div className="rounded-lg border border-error/40 bg-error/10 p-3 text-[11px] text-error">{err}</div>
           )}
 
           <div className="mt-auto flex flex-col gap-2 border-t border-border pt-3">
@@ -397,7 +441,7 @@ export function PageDetailEditor({
               disabled={!dirty}
               className="inline-flex h-10 items-center justify-center rounded-full bg-brand px-4 text-sm font-medium text-white hover:bg-brand-hover disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {dirty ? "Save changes" : "No changes"}
+              {dirty ? "Save & continue" : "No changes"}
             </button>
           </div>
         </div>
@@ -426,7 +470,6 @@ function pointSegmentDistance(
 }
 
 function findModelLabel(id: string): string {
-  // Avoid a sync import dependency cycle — derive label from id.
   if (id.includes("sonnet")) return "Claude Sonnet 4.5";
   if (id.includes("haiku")) return "Claude Haiku 4.5";
   if (id.includes("gpt-5")) return "GPT-5";

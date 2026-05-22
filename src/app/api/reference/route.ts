@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { renderReferenceImage } from "@/lib/static-map";
+import type { TileType } from "@/lib/map-tiles";
 import type { Feature, MultiPolygon, Polygon } from "geojson";
 
 export const runtime = "nodejs";
@@ -9,6 +10,7 @@ export const dynamic = "force-dynamic";
 type Body = {
   parcel?: Feature<Polygon | MultiPolygon>;
   size?: number;
+  tileType?: TileType;
 };
 
 export async function POST(req: NextRequest) {
@@ -18,7 +20,8 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "parcel GeoJSON Feature required" }, { status: 400 });
     }
     const size = Math.min(Math.max(body.size ?? 640, 256), 1024);
-    const out = await renderReferenceImage(body.parcel, size);
+    const tileType: TileType = body.tileType === "satellite" ? "satellite" : "standard";
+    const out = await renderReferenceImage(body.parcel, size, tileType);
     return NextResponse.json(out);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);

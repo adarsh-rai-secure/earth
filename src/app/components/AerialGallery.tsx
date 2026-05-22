@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { canvasToDataUrl, composeMarkedDataUrl, downsampleDataUrl } from "@/lib/canvas-mark";
+import { canvasToDataUrl } from "@/lib/canvas-mark";
 import { extractAddressCandidates } from "@/lib/extract-addresses";
 import { getPageCount, renderPdfToCanvases } from "@/lib/pdf-render";
 import { DEFAULT_VISION_MODEL_ID } from "@/lib/vision-models";
@@ -25,9 +25,6 @@ type Tile = {
   error?: string;
 };
 
-const MARK_CONCURRENCY = 4;
-const MARK_INPUT_MAX_SIDE = 1024;
-
 export function AerialGallery({
   file,
   parcel,
@@ -43,22 +40,34 @@ export function AerialGallery({
 }) {
   const [tiles, setTiles] = useState<Tile[]>([]);
   const [renderBusy, setRenderBusy] = useState(false);
-  const [markBusy, setMarkBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [model, setModel] = useState<string>(DEFAULT_VISION_MODEL_ID);
-  const [editorOpenIdx, setEditorOpenIdx] = useState<number | null>(null);
-  const cancelRef = useRef(false);
 
+  // Select mode
+  const [selectMode, setSelectMode] = useState(false);
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+
+  // Editor
+  const [editorOpenIdx, setEditorOpenIdx] = useState<number | null>(null);
+  const [navigableIndices, setNavigableIndices] = useState<number[]>([]);
+  // Last saved marked image to feed forward into vision for the next page
+  const [lastSavedRef, setLastSavedRef] = useState<string | null>(null);
+
+  const cancelRef = useRef(false);
   const tilesRef = useRef<Tile[]>([]);
   useEffect(() => {
     tilesRef.current = tiles;
   }, [tiles]);
 
+  // Render pages
   useEffect(() => {
     cancelRef.current = false;
     setTiles([]);
     setErr(null);
     setEditorOpenIdx(null);
+    setSelected(new Set());
+    setSelectMode(false);
+    setLastSavedRef(null);
     if (!file) return;
     setRenderBusy(true);
 
@@ -103,6 +112,7 @@ export function AerialGallery({
     };
   }, [file]);
 
+  // Address candidates
   const candidates = useMemo(() => {
     if (tiles.length === 0) return [];
     return extractAddressCandidates(tiles.map((t) => t.pageText));
@@ -112,150 +122,96 @@ export function AerialGallery({
     onAddressCandidates?.(candidates);
   }, [candidates, onAddressCandidates]);
 
-  const markOne = useCallback(
-    async (idx: number) => {
-      if (!parcel) return;
-      const current = tilesRef.current[idx];
-      if (!current?.rawDataUrl) {
-        setTiles((prev) => {
-          const next = [...prev];
-          if (next[idx]) next[idx] = { ...next[idx], status: "error", error: "Page not yet rendered" };
-          return next;
-        });
-        return;
-      }
-      const raw = current.rawDataUrl;
+  // Tile selection
+  const toggleSelect = useCallback((idx: number) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(idx)) next.delete(idx);
+      else next.add(idx);
+      return next;
+    });
+  }, []);
 
-      setTiles((prev) => {
-        const next = [...prev];
-        if (next[idx]) next[idx] = { ...next[idx], status: "marking", error: undefined };
-        return next;
-      });
+  const enterSelectMode = useCallback(() => setSelectMode(true), []);
+  const exitSelectMode = useCallback(() => {
+    setSelectMode(false);
+    setSelected(new Set());
+  }, []);
 
-      try {
-        const downsampled = await downsampleDataUrl(raw, MARK_INPUT_MAX_SIDE, 0.85);
-        const res = await fetch("/api/mark", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            imageDataUrl: downsampled,
-            parcel: parcel.parcel,
-            address: parcel.addressNormalized,
-            referenceImageDataUrl: referenceImageDataUrl ?? null,
-            model,
-          }),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data?.error ?? `HTTP ${res.status}`);
+  const selectAll = useCallback(() => {
+    setSelected(new Set(tilesRef.current.filter((t) => t.rawDataUrl).map((t) => t.pageIndex)));
+  }, []);
 
-        const polygon =
-          Array.isArray(data.pixelPolygon) && data.pixelPolygon.length >= 3
-            ? (data.pixelPolygon as Array<[number, number]>)
-            : [];
-        const markedDataUrl =
-          data.visible && polygon.length >= 3 ? await composeMarkedDataUrl(raw, polygon) : null;
+  const deleteSelected = useCallback(() => {
+    if (selected.size === 0) return;
+    setTiles((prev) => prev.filter((t) => !selected.has(t.pageIndex)));
+    setSelected(new Set());
+  }, [selected]);
 
-        setTiles((prev) => {
-          const next = [...prev];
-          if (next[idx]) {
-            next[idx] = {
-              ...next[idx],
-              markedDataUrl,
-              polygon,
-              status: "ready",
-              mark: {
-                visible: Boolean(data.visible),
-                confidence: Number(data.confidence ?? 0),
-                rationale: String(data.rationale ?? ""),
-                modelUsed: String(data.modelUsed ?? model),
-              },
-            };
-          }
-          return next;
-        });
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        setTiles((prev) => {
-          const next = [...prev];
-          if (next[idx]) next[idx] = { ...next[idx], status: "error", error: msg };
-          return next;
-        });
-      }
-    },
-    [parcel, referenceImageDataUrl, model]
-  );
-
-  const markAll = useCallback(async () => {
-    if (!parcel || markBusy) return;
-    setMarkBusy(true);
-    setErr(null);
-    try {
-      const indices = tilesRef.current
-        .map((t, i) => (t.rawDataUrl && t.status === "ready" ? i : -1))
-        .filter((i) => i >= 0);
-
-      const queue = [...indices];
-      const workers = Array.from({ length: MARK_CONCURRENCY }, async () => {
-        while (queue.length > 0) {
-          const i = queue.shift();
-          if (i === undefined) break;
-          await markOne(i);
-        }
-      });
-      await Promise.all(workers);
-    } finally {
-      setMarkBusy(false);
-    }
-  }, [parcel, markBusy, markOne]);
-
-  const downloadTile = useCallback(
-    (tile: Tile) => {
+  const downloadSelected = useCallback(async () => {
+    if (selected.size === 0) return;
+    const sortedIndices = [...selected].sort((a, b) => a - b);
+    for (const idx of sortedIndices) {
+      const tile = tilesRef.current.find((t) => t.pageIndex === idx);
+      if (!tile) continue;
       const url = tile.markedDataUrl ?? tile.rawDataUrl;
-      if (!url) return;
+      if (!url) continue;
+      const a = document.createElement("a");
+      a.href = url;
+      const base = (baseFilename ?? file?.name ?? "aerial").replace(/\.[^.]+$/, "");
+      const tag = tile.markedDataUrl ? "marked" : "raw";
+      a.download = `${base}-page-${String(idx + 1).padStart(2, "0")}-${tag}.png`;
+      a.click();
+      await new Promise((r) => setTimeout(r, 120));
+    }
+  }, [selected, baseFilename, file]);
+
+  const downloadAll = useCallback(async () => {
+    for (const tile of tilesRef.current) {
+      const url = tile.markedDataUrl ?? tile.rawDataUrl;
+      if (!url) continue;
       const a = document.createElement("a");
       a.href = url;
       const base = (baseFilename ?? file?.name ?? "aerial").replace(/\.[^.]+$/, "");
       const tag = tile.markedDataUrl ? "marked" : "raw";
       a.download = `${base}-page-${String(tile.pageIndex + 1).padStart(2, "0")}-${tag}.png`;
       a.click();
-    },
-    [baseFilename, file]
-  );
-
-  const downloadAll = useCallback(async () => {
-    for (const tile of tiles) {
-      if (tile.rawDataUrl || tile.markedDataUrl) {
-        downloadTile(tile);
-        await new Promise((r) => setTimeout(r, 120));
-      }
+      await new Promise((r) => setTimeout(r, 120));
     }
-  }, [tiles, downloadTile]);
+  }, [baseFilename, file]);
 
-  const openEditor = useCallback((idx: number) => {
-    const t = tilesRef.current[idx];
+  const proceedToEditor = useCallback(() => {
+    const indices = [...selected].sort((a, b) => a - b);
+    if (indices.length === 0) return;
+    setNavigableIndices(indices);
+    setEditorOpenIdx(indices[0]);
+  }, [selected]);
+
+  const openEditorForTile = useCallback((idx: number) => {
+    const t = tilesRef.current.find((x) => x.pageIndex === idx);
     if (!t?.rawDataUrl) return;
+    // When opening from a single tile click, navigate through all rendered pages
+    setNavigableIndices(tilesRef.current.filter((x) => x.rawDataUrl).map((x) => x.pageIndex));
     setEditorOpenIdx(idx);
   }, []);
 
   const navigateEditor = useCallback((direction: -1 | 1) => {
     setEditorOpenIdx((current) => {
       if (current === null) return null;
-      const total = tilesRef.current.length;
-      let next = current + direction;
-      // skip pages without a rendered image
-      while (next >= 0 && next < total && !tilesRef.current[next]?.rawDataUrl) {
-        next += direction;
-      }
-      if (next < 0 || next >= total) return current;
-      return next;
+      const order = navigableIndices;
+      const pos = order.indexOf(current);
+      if (pos < 0) return current;
+      const nextPos = pos + direction;
+      if (nextPos < 0 || nextPos >= order.length) return current;
+      return order[nextPos];
     });
-  }, []);
+  }, [navigableIndices]);
 
-  const saveFromEditor = useCallback((updated: EditorTile) => {
+  const saveFromEditor = useCallback((updated: EditorTile, wasManual: boolean) => {
     setTiles((prev) => {
       const next = [...prev];
-      const idx = updated.pageIndex;
-      if (next[idx]) {
+      const idx = next.findIndex((t) => t.pageIndex === updated.pageIndex);
+      if (idx >= 0) {
         next[idx] = {
           ...next[idx],
           polygon: updated.polygon,
@@ -266,35 +222,40 @@ export function AerialGallery({
       }
       return next;
     });
+    // Feed forward: any saved marked image becomes the new "prior confirmed" reference.
+    // Manual saves are the most reliable; vision-only saves are still useful as style refs.
+    if (updated.markedDataUrl) {
+      void wasManual; // currently every save is treated equivalently — keep flag for future weighting
+      setLastSavedRef(updated.markedDataUrl);
+    }
   }, []);
 
   if (!file) return null;
 
   const ready = tiles.filter((t) => t.rawDataUrl).length;
   const markedCount = tiles.filter((t) => t.markedDataUrl).length;
-  const noMapCount = tiles.filter((t) => t.mark && !t.mark.visible).length;
   const total = tiles.length;
-  const canMark = !!parcel && ready > 0 && !markBusy && !renderBusy;
+  const selectedCount = selected.size;
 
-  const editorTile: EditorTile | null =
-    editorOpenIdx !== null && tiles[editorOpenIdx]?.rawDataUrl
-      ? {
-          pageIndex: tiles[editorOpenIdx].pageIndex,
-          rawDataUrl: tiles[editorOpenIdx].rawDataUrl!,
-          markedDataUrl: tiles[editorOpenIdx].markedDataUrl,
-          pageText: tiles[editorOpenIdx].pageText,
-          polygon: tiles[editorOpenIdx].polygon,
-          mark: tiles[editorOpenIdx].mark,
-        }
-      : null;
+  const editorTile: EditorTile | null = (() => {
+    if (editorOpenIdx === null) return null;
+    const t = tiles.find((x) => x.pageIndex === editorOpenIdx);
+    if (!t?.rawDataUrl) return null;
+    return {
+      pageIndex: t.pageIndex,
+      rawDataUrl: t.rawDataUrl,
+      markedDataUrl: t.markedDataUrl,
+      pageText: t.pageText,
+      polygon: t.polygon,
+      mark: t.mark,
+    };
+  })();
 
   return (
     <div className="rounded-2xl border border-border bg-card p-5">
       <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
         <div>
-          <div className="text-xs font-semibold uppercase tracking-wider text-muted">
-            Aerial timeline
-          </div>
+          <div className="text-xs font-semibold uppercase tracking-wider text-muted">Aerial timeline</div>
           <div className="mt-1 text-sm">
             {renderBusy ? (
               <span className="text-muted">
@@ -305,12 +266,7 @@ export function AerialGallery({
             ) : total > 0 ? (
               <span>
                 {total} page{total === 1 ? "" : "s"} rendered
-                {markedCount > 0 && (
-                  <span className="ml-2 text-muted">
-                    · {markedCount} with boundary
-                    {noMapCount > 0 && ` · ${noMapCount} no map`}
-                  </span>
-                )}
+                {markedCount > 0 && <span className="ml-2 text-muted">· {markedCount} saved</span>}
               </span>
             ) : (
               <span className="text-muted">Waiting for PDF…</span>
@@ -323,24 +279,83 @@ export function AerialGallery({
           )}
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <VisionModelPicker value={model} onChange={setModel} disabled={markBusy} compact />
-          <button
-            onClick={markAll}
-            disabled={!canMark}
-            className="inline-flex h-9 items-center rounded-full bg-brand px-4 text-xs font-medium text-white transition-colors hover:bg-brand-hover disabled:cursor-not-allowed disabled:opacity-50"
-            title={!parcel ? "Select a property first" : "Sends each page to the selected vision model"}
-          >
-            {markBusy ? `Marking… ${markedCount}/${total}` : `Mark all ${total} pages`}
-          </button>
-          <button
-            onClick={downloadAll}
-            disabled={renderBusy || total === 0}
-            className="inline-flex h-9 items-center rounded-full border border-border bg-background px-4 text-xs font-medium hover:border-foreground/30 disabled:opacity-60"
-          >
-            Download all PNGs
-          </button>
+          <VisionModelPicker value={model} onChange={setModel} disabled={renderBusy} compact />
+          {!selectMode ? (
+            <>
+              <button
+                onClick={enterSelectMode}
+                disabled={renderBusy || total === 0}
+                className="inline-flex h-9 items-center rounded-full bg-brand px-4 text-xs font-medium text-white hover:bg-brand-hover disabled:cursor-not-allowed disabled:opacity-50"
+                title="Pick which pages to keep / process; remove cover and index pages"
+              >
+                ☑ Select images
+              </button>
+              <button
+                onClick={downloadAll}
+                disabled={renderBusy || total === 0}
+                className="inline-flex h-9 items-center rounded-full border border-border bg-background px-4 text-xs font-medium hover:border-foreground/30 disabled:opacity-60"
+              >
+                Download all PNGs
+              </button>
+            </>
+          ) : (
+            <button
+              onClick={exitSelectMode}
+              className="inline-flex h-9 items-center rounded-full border border-border bg-background px-4 text-xs font-medium hover:border-foreground/30"
+            >
+              ✕ Exit select
+            </button>
+          )}
         </div>
       </div>
+
+      {selectMode && (
+        <div className="sticky top-2 z-10 mb-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-brand/40 bg-brand/10 px-4 py-3 text-sm shadow-sm backdrop-blur">
+          <div className="flex items-center gap-3">
+            <span className="font-semibold">
+              {selectedCount} selected
+              {total > 0 && <span className="ml-1 text-muted">of {total}</span>}
+            </span>
+            <button
+              onClick={selectAll}
+              className="text-xs text-brand underline-offset-2 hover:underline"
+            >
+              Select all
+            </button>
+            <button
+              onClick={() => setSelected(new Set())}
+              disabled={selectedCount === 0}
+              className="text-xs text-muted underline-offset-2 hover:text-foreground hover:underline disabled:opacity-40"
+            >
+              Clear
+            </button>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={deleteSelected}
+              disabled={selectedCount === 0}
+              className="inline-flex h-8 items-center rounded-full border border-error/50 bg-background px-3 text-xs font-medium text-error hover:bg-error/10 disabled:opacity-40"
+            >
+              🗑 Delete selected
+            </button>
+            <button
+              onClick={downloadSelected}
+              disabled={selectedCount === 0}
+              className="inline-flex h-8 items-center rounded-full border border-border bg-background px-3 text-xs font-medium hover:border-foreground/30 disabled:opacity-40"
+            >
+              ↓ Download selected
+            </button>
+            <button
+              onClick={proceedToEditor}
+              disabled={selectedCount === 0 || !parcel}
+              className="inline-flex h-8 items-center rounded-full bg-brand px-3 text-xs font-medium text-white hover:bg-brand-hover disabled:cursor-not-allowed disabled:opacity-50"
+              title={!parcel ? "Confirm a property first" : "Open the page editor on the selected pages"}
+            >
+              Proceed to editor →
+            </button>
+          </div>
+        </div>
+      )}
 
       {tiles.length === 0 ? (
         <div className="flex h-32 items-center justify-center text-sm text-muted">
@@ -348,14 +363,14 @@ export function AerialGallery({
         </div>
       ) : (
         <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3">
-          {tiles.map((tile, i) => (
+          {tiles.map((tile) => (
             <TileView
               key={tile.pageIndex}
               tile={tile}
-              onDownload={() => downloadTile(tile)}
-              onMark={() => markOne(i)}
-              onOpen={() => openEditor(i)}
-              canMark={!!parcel && tile.status !== "marking" && !!tile.rawDataUrl}
+              selectMode={selectMode}
+              selected={selected.has(tile.pageIndex)}
+              onToggleSelect={() => toggleSelect(tile.pageIndex)}
+              onOpen={() => openEditorForTile(tile.pageIndex)}
             />
           ))}
         </div>
@@ -365,13 +380,13 @@ export function AerialGallery({
         <PageDetailEditor
           tile={editorTile}
           totalPages={tiles.length}
+          navigableIndices={navigableIndices.length > 0 ? navigableIndices : tiles.filter((t) => t.rawDataUrl).map((t) => t.pageIndex)}
           parcel={parcel}
           referenceImageDataUrl={referenceImageDataUrl ?? null}
+          previousMarkedImageDataUrl={lastSavedRef}
           defaultModel={model}
           baseFilename={baseFilename}
-          onSave={(updated) => {
-            saveFromEditor(updated);
-          }}
+          onSave={saveFromEditor}
           onClose={() => setEditorOpenIdx(null)}
           onNavigate={navigateEditor}
         />
@@ -382,27 +397,33 @@ export function AerialGallery({
 
 function TileView({
   tile,
-  onDownload,
-  onMark,
+  selectMode,
+  selected,
+  onToggleSelect,
   onOpen,
-  canMark,
 }: {
   tile: Tile;
-  onDownload: () => void;
-  onMark: () => void;
+  selectMode: boolean;
+  selected: boolean;
+  onToggleSelect: () => void;
   onOpen: () => void;
-  canMark: boolean;
 }) {
   const displayUrl = tile.markedDataUrl ?? tile.rawDataUrl;
   const mark = tile.mark;
   return (
-    <div className="overflow-hidden rounded-xl border border-border bg-background transition-colors hover:border-foreground/30">
+    <div
+      className={`overflow-hidden rounded-xl border bg-background transition-colors ${
+        selectMode && selected
+          ? "border-brand ring-2 ring-brand/40"
+          : "border-border hover:border-foreground/30"
+      }`}
+    >
       <button
         type="button"
-        onClick={onOpen}
+        onClick={selectMode ? onToggleSelect : onOpen}
         disabled={!displayUrl}
         className="block w-full text-left disabled:cursor-default"
-        title={displayUrl ? "Open page editor" : "Page not rendered yet"}
+        title={selectMode ? (selected ? "Deselect" : "Select") : "Open page editor"}
       >
         <div className="relative aspect-[4/3] w-full bg-foreground/[0.04]">
           {displayUrl ? (
@@ -418,12 +439,17 @@ function TileView({
               {tile.status === "pending" ? "queued" : "rendering…"}
             </div>
           )}
-          {tile.status === "marking" && (
-            <div className="absolute inset-0 flex items-center justify-center bg-background/70 text-xs text-foreground">
-              marking…
+          {selectMode && (
+            <div
+              className={`absolute left-2 top-2 flex h-6 w-6 items-center justify-center rounded-md border-2 text-xs font-bold shadow ${
+                selected ? "border-brand bg-brand text-white" : "border-border bg-background/90 text-transparent"
+              }`}
+              aria-hidden
+            >
+              ✓
             </div>
           )}
-          {mark && (
+          {mark && !selectMode && (
             <div className="absolute right-2 top-2 rounded-full bg-background/90 px-2 py-0.5 text-[10px] font-semibold shadow">
               {mark.visible ? (
                 <span className="text-brand">boundary · {(mark.confidence * 100).toFixed(0)}%</span>
@@ -432,34 +458,20 @@ function TileView({
               )}
             </div>
           )}
-          {displayUrl && (
-            <div className="absolute inset-x-0 bottom-0 flex justify-center bg-gradient-to-t from-foreground/40 to-transparent pb-2 pt-6 opacity-0 transition-opacity group-hover:opacity-100 hover:opacity-100">
-              <span className="rounded-full bg-background/90 px-3 py-0.5 text-[10px] font-medium shadow">
-                Open editor →
-              </span>
-            </div>
-          )}
         </div>
       </button>
       <div className="px-3 pb-2 pt-2">
         <div className="flex items-center justify-between">
           <span className="text-xs font-medium">Page {tile.pageIndex + 1}</span>
-          <div className="flex items-center gap-3">
+          {!selectMode && (
             <button
-              onClick={onMark}
-              disabled={!canMark}
-              className="text-[11px] text-muted underline-offset-2 hover:text-foreground hover:underline disabled:opacity-40"
-            >
-              {tile.markedDataUrl ? "Re-mark" : mark && !mark.visible ? "Re-check" : "Mark"}
-            </button>
-            <button
-              onClick={onDownload}
+              onClick={onOpen}
               disabled={!displayUrl}
               className="text-[11px] text-muted underline-offset-2 hover:text-foreground hover:underline disabled:opacity-40"
             >
-              Download
+              Open editor →
             </button>
-          </div>
+          )}
         </div>
         {tile.pageText && (
           <div className="mt-1 line-clamp-1 text-[10px] text-muted" title={tile.pageText}>

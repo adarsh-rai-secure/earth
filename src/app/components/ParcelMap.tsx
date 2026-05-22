@@ -1,19 +1,21 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import type { Map as LeafletMap, GeoJSON as LeafletGeoJSON } from "leaflet";
+import type { Map as LeafletMap, GeoJSON as LeafletGeoJSON, TileLayer as LeafletTileLayer } from "leaflet";
 import type { Feature, Polygon, MultiPolygon } from "geojson";
+import { TILE_SOURCES, type TileType } from "@/lib/map-tiles";
 
 type Props = {
   parcel: Feature<Polygon | MultiPolygon> | null;
   centroid: { lat: number; lng: number } | null;
+  tileType?: TileType;
   height?: number;
 };
 
-// We dynamic-import leaflet inside useEffect so it never runs during SSR.
-export default function ParcelMap({ parcel, centroid, height = 380 }: Props) {
+export default function ParcelMap({ parcel, centroid, tileType = "standard", height = 380 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<LeafletMap | null>(null);
+  const tileLayerRef = useRef<LeafletTileLayer | null>(null);
   const layerRef = useRef<LeafletGeoJSON | null>(null);
 
   useEffect(() => {
@@ -31,14 +33,20 @@ export default function ParcelMap({ parcel, centroid, height = 380 }: Props) {
           zoomControl: true,
           attributionControl: true,
         });
-        L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-          maxZoom: 19,
-          attribution: '© <a href="https://www.openstreetmap.org/copyright">OSM</a>',
-        }).addTo(map);
         mapRef.current = map;
       }
 
       const map = mapRef.current!;
+      const source = TILE_SOURCES[tileType];
+
+      if (tileLayerRef.current) {
+        map.removeLayer(tileLayerRef.current);
+      }
+      tileLayerRef.current = L.tileLayer(source.urlTemplate, {
+        maxZoom: source.maxZoom,
+        attribution: source.attribution,
+        subdomains: source.subdomains ?? "abc",
+      }).addTo(map);
 
       if (layerRef.current) {
         map.removeLayer(layerRef.current);
@@ -50,7 +58,7 @@ export default function ParcelMap({ parcel, centroid, height = 380 }: Props) {
           style: {
             color: "#2d5a3d",
             weight: 3,
-            fillColor: "#22c55e",
+            fillColor: tileType === "satellite" ? "#22c55e" : "#22c55e",
             fillOpacity: 0.18,
           },
         }).addTo(map);
@@ -67,7 +75,7 @@ export default function ParcelMap({ parcel, centroid, height = 380 }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [parcel, centroid]);
+  }, [parcel, centroid, tileType]);
 
   return (
     <div
