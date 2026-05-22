@@ -50,8 +50,14 @@ export function AerialGallery({
   // Editor
   const [editorOpenIdx, setEditorOpenIdx] = useState<number | null>(null);
   const [navigableIndices, setNavigableIndices] = useState<number[]>([]);
-  // Last saved marked image to feed forward into vision for the next page
-  const [lastSavedRef, setLastSavedRef] = useState<string | null>(null);
+  // Last saved marked image + polygon to feed forward into the next page
+  const [lastSaved, setLastSaved] = useState<{
+    dataUrl: string;
+    polygon: Array<[number, number]>;
+  } | null>(null);
+
+  // Sort order
+  const [sortMode, setSortMode] = useState<"original" | "newestFirst">("original");
 
   const cancelRef = useRef(false);
   const tilesRef = useRef<Tile[]>([]);
@@ -67,7 +73,8 @@ export function AerialGallery({
     setEditorOpenIdx(null);
     setSelected(new Set());
     setSelectMode(false);
-    setLastSavedRef(null);
+    setLastSaved(null);
+    setSortMode("original");
     if (!file) return;
     setRenderBusy(true);
 
@@ -181,19 +188,29 @@ export function AerialGallery({
   }, [baseFilename, file]);
 
   const proceedToEditor = useCallback(() => {
-    const indices = [...selected].sort((a, b) => a - b);
+    // Walk the selected pages in the currently displayed sort order.
+    const sortFn = (a: number, b: number) =>
+      sortMode === "newestFirst" ? b - a : a - b;
+    const indices = [...selected].sort(sortFn);
     if (indices.length === 0) return;
     setNavigableIndices(indices);
     setEditorOpenIdx(indices[0]);
-  }, [selected]);
+  }, [selected, sortMode]);
 
-  const openEditorForTile = useCallback((idx: number) => {
-    const t = tilesRef.current.find((x) => x.pageIndex === idx);
-    if (!t?.rawDataUrl) return;
-    // When opening from a single tile click, navigate through all rendered pages
-    setNavigableIndices(tilesRef.current.filter((x) => x.rawDataUrl).map((x) => x.pageIndex));
-    setEditorOpenIdx(idx);
-  }, []);
+  const openEditorForTile = useCallback(
+    (idx: number) => {
+      const t = tilesRef.current.find((x) => x.pageIndex === idx);
+      if (!t?.rawDataUrl) return;
+      // When opening from a single tile click, navigate through all rendered pages
+      // in the currently displayed sort order.
+      const ordered = [...tilesRef.current.filter((x) => x.rawDataUrl)].sort((a, b) =>
+        sortMode === "newestFirst" ? b.pageIndex - a.pageIndex : a.pageIndex - b.pageIndex
+      );
+      setNavigableIndices(ordered.map((x) => x.pageIndex));
+      setEditorOpenIdx(idx);
+    },
+    [sortMode]
+  );
 
   const navigateEditor = useCallback((direction: -1 | 1) => {
     setEditorOpenIdx((current) => {
@@ -222,11 +239,9 @@ export function AerialGallery({
       }
       return next;
     });
-    // Feed forward: any saved marked image becomes the new "prior confirmed" reference.
-    // Manual saves are the most reliable; vision-only saves are still useful as style refs.
-    if (updated.markedDataUrl) {
-      void wasManual; // currently every save is treated equivalently — keep flag for future weighting
-      setLastSavedRef(updated.markedDataUrl);
+    if (updated.markedDataUrl && updated.polygon.length >= 3) {
+      void wasManual;
+      setLastSaved({ dataUrl: updated.markedDataUrl, polygon: updated.polygon });
     }
   }, []);
 
@@ -236,6 +251,9 @@ export function AerialGallery({
   const markedCount = tiles.filter((t) => t.markedDataUrl).length;
   const total = tiles.length;
   const selectedCount = selected.size;
+
+  const sortedTiles =
+    sortMode === "newestFirst" ? [...tiles].sort((a, b) => b.pageIndex - a.pageIndex) : tiles;
 
   const editorTile: EditorTile | null = (() => {
     if (editorOpenIdx === null) return null;
@@ -280,6 +298,26 @@ export function AerialGallery({
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <VisionModelPicker value={model} onChange={setModel} disabled={renderBusy} compact />
+          <div className="inline-flex h-9 rounded-full border border-border bg-card p-0.5 text-[11px]">
+            <button
+              onClick={() => setSortMode("original")}
+              className={`rounded-full px-3 transition-colors ${
+                sortMode === "original" ? "bg-brand text-white" : "text-muted hover:text-foreground"
+              }`}
+              title="PDF original order"
+            >
+              Oldest first
+            </button>
+            <button
+              onClick={() => setSortMode("newestFirst")}
+              className={`rounded-full px-3 transition-colors ${
+                sortMode === "newestFirst" ? "bg-brand text-white" : "text-muted hover:text-foreground"
+              }`}
+              title="Reverse: last PDF page (likely most recent aerial) first"
+            >
+              Newest first
+            </button>
+          </div>
           {!selectMode ? (
             <>
               <button
@@ -363,7 +401,7 @@ export function AerialGallery({
         </div>
       ) : (
         <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3">
-          {tiles.map((tile) => (
+          {sortedTiles.map((tile) => (
             <TileView
               key={tile.pageIndex}
               tile={tile}
@@ -380,10 +418,11 @@ export function AerialGallery({
         <PageDetailEditor
           tile={editorTile}
           totalPages={tiles.length}
-          navigableIndices={navigableIndices.length > 0 ? navigableIndices : tiles.filter((t) => t.rawDataUrl).map((t) => t.pageIndex)}
+          navigableIndices={navigableIndices.length > 0 ? navigableIndices : sortedTiles.filter((t) => t.rawDataUrl).map((t) => t.pageIndex)}
           parcel={parcel}
           referenceImageDataUrl={referenceImageDataUrl ?? null}
-          previousMarkedImageDataUrl={lastSavedRef}
+          previousMarkedImageDataUrl={lastSaved?.dataUrl ?? null}
+          previousMarkedPolygon={lastSaved?.polygon ?? null}
           defaultModel={model}
           baseFilename={baseFilename}
           onSave={saveFromEditor}
