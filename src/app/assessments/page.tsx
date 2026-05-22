@@ -128,7 +128,7 @@ export default function AssessmentsPage() {
                 {(aerialFile.size / 1_048_576).toFixed(2)} MB
               </div>
             </div>
-            <AerialGallery file={aerialFile} baseFilename={aerialFile.name} />
+            <AerialGallery file={aerialFile} parcel={parcel} baseFilename={aerialFile.name} />
           </div>
         )}
       </section>

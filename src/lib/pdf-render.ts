@@ -6,6 +6,7 @@ export type RenderedPage = {
   canvas: HTMLCanvasElement;
   width: number;
   height: number;
+  pageText: string;
 };
 
 let workerConfigured = false;
@@ -13,8 +14,7 @@ let workerConfigured = false;
 async function configureWorker(): Promise<typeof import("pdfjs-dist")> {
   const pdfjs = await import("pdfjs-dist");
   if (!workerConfigured) {
-    // Option B from PLAN.md — unpkg CDN keyed to the installed version. Avoids
-    // Turbopack/?url import complexity; works the same in dev and prod.
+    // unpkg CDN keyed to the installed version. Avoids Turbopack/?url import complexity.
     pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
     workerConfigured = true;
   }
@@ -44,9 +44,28 @@ export async function* renderPdfToCanvases(
       if (!ctx) throw new Error("Failed to get 2D canvas context");
 
       await page.render({ canvasContext: ctx, viewport, canvas }).promise;
+
+      let pageText = "";
+      try {
+        const tc = await page.getTextContent();
+        pageText = tc.items
+          .map((it) => ("str" in it ? (it as { str: string }).str : ""))
+          .join(" ")
+          .replace(/\s+/g, " ")
+          .trim();
+      } catch {
+        // text layer is best-effort; aerial PDFs often have no text
+      }
+
       page.cleanup();
 
-      yield { pageIndex: i - 1, canvas, width: canvas.width, height: canvas.height };
+      yield {
+        pageIndex: i - 1,
+        canvas,
+        width: canvas.width,
+        height: canvas.height,
+        pageText,
+      };
     }
   } finally {
     await doc.destroy().catch(() => {});
@@ -60,13 +79,4 @@ export async function getPageCount(file: File): Promise<number> {
   const n = doc.numPages;
   await doc.destroy().catch(() => {});
   return n;
-}
-
-export function canvasToBlob(canvas: HTMLCanvasElement, type = "image/png"): Promise<Blob> {
-  return new Promise((resolve, reject) => {
-    canvas.toBlob((b) => {
-      if (b) resolve(b);
-      else reject(new Error("canvas.toBlob returned null"));
-    }, type);
-  });
 }
