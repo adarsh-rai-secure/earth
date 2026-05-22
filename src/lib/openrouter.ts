@@ -29,8 +29,8 @@ export async function generateCompletion(
     headers: {
       Authorization: `Bearer ${key}`,
       "Content-Type": "application/json",
-      "HTTP-Referer": "https://earth-demo.vercel.app",
-      "X-Title": "Earth — AMA Earth Live Build Scaffold",
+      "HTTP-Referer": "https://earth-rouge.vercel.app",
+      "X-Title": "Earth - AMA Earth Live Build Scaffold",
     },
     body: JSON.stringify(body),
   });
