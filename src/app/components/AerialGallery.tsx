@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { canvasToDataUrl, composeMarkedDataUrl, downsampleDataUrl } from "@/lib/canvas-mark";
+import { extractAddressCandidates } from "@/lib/extract-addresses";
 import { getPageCount, renderPdfToCanvases } from "@/lib/pdf-render";
 import type { ParcelLookupResult } from "@/app/components/AddressInput";
 
@@ -26,10 +27,12 @@ export function AerialGallery({
   file,
   parcel,
   baseFilename,
+  onAddressCandidates,
 }: {
   file: File | null;
   parcel: ParcelLookupResult | null;
   baseFilename?: string;
+  onAddressCandidates?: (candidates: string[]) => void;
 }) {
   const [tiles, setTiles] = useState<Tile[]>([]);
   const [renderBusy, setRenderBusy] = useState(false);
@@ -37,6 +40,13 @@ export function AerialGallery({
   const [err, setErr] = useState<string | null>(null);
   const cancelRef = useRef(false);
 
+  // Mirror tiles into a ref so async workers can read fresh state without setTiles-as-read hack.
+  const tilesRef = useRef<Tile[]>([]);
+  useEffect(() => {
+    tilesRef.current = tiles;
+  }, [tiles]);
+
+  // Render pages on file change
   useEffect(() => {
     cancelRef.current = false;
     setTiles([]);
@@ -47,15 +57,14 @@ export function AerialGallery({
     (async () => {
       try {
         const count = await getPageCount(file);
-        setTiles(
-          Array.from({ length: count }, (_, i) => ({
-            pageIndex: i,
-            rawDataUrl: null,
-            markedDataUrl: null,
-            pageText: "",
-            status: "pending" as const,
-          }))
-        );
+        const initial: Tile[] = Array.from({ length: count }, (_, i) => ({
+          pageIndex: i,
+          rawDataUrl: null,
+          markedDataUrl: null,
+          pageText: "",
+          status: "pending",
+        }));
+        setTiles(initial);
 
         for await (const page of renderPdfToCanvases(file, { dpi: 100 })) {
           if (cancelRef.current) return;
@@ -84,25 +93,38 @@ export function AerialGallery({
     };
   }, [file]);
 
+  // Emit address candidates derived from page text whenever it changes
+  const candidates = useMemo(() => {
+    if (tiles.length === 0) return [];
+    return extractAddressCandidates(tiles.map((t) => t.pageText));
+  }, [tiles]);
+
+  useEffect(() => {
+    onAddressCandidates?.(candidates);
+  }, [candidates, onAddressCandidates]);
+
   const markOne = useCallback(
     async (idx: number) => {
       if (!parcel) return;
+      const current = tilesRef.current[idx];
+      if (!current?.rawDataUrl) {
+        setTiles((prev) => {
+          const next = [...prev];
+          if (next[idx]) next[idx] = { ...next[idx], status: "error", error: "Page not yet rendered" };
+          return next;
+        });
+        return;
+      }
+      const raw = current.rawDataUrl;
+
       setTiles((prev) => {
         const next = [...prev];
         if (next[idx]) next[idx] = { ...next[idx], status: "marking", error: undefined };
         return next;
       });
+
       try {
-        // Read latest tile state from a fresh setTiles closure
-        let raw: string | null = null;
-        setTiles((prev) => {
-          raw = prev[idx]?.rawDataUrl ?? null;
-          return prev;
-        });
-        if (!raw) throw new Error("Tile has no rendered image yet");
-
         const downsampled = await downsampleDataUrl(raw, MARK_INPUT_MAX_SIDE, 0.85);
-
         const res = await fetch("/api/mark", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -153,14 +175,9 @@ export function AerialGallery({
     setMarkBusy(true);
     setErr(null);
     try {
-      const indices: number[] = [];
-      // pick fresh ready tiles
-      setTiles((prev) => {
-        prev.forEach((t, i) => {
-          if (t.status === "ready") indices.push(i);
-        });
-        return prev;
-      });
+      const indices = tilesRef.current
+        .map((t, i) => (t.rawDataUrl && t.status === "ready" ? i : -1))
+        .filter((i) => i >= 0);
 
       const queue = [...indices];
       const workers = Array.from({ length: MARK_CONCURRENCY }, async () => {
@@ -201,8 +218,9 @@ export function AerialGallery({
 
   if (!file) return null;
 
-  const ready = tiles.filter((t) => t.status === "ready" || t.status === "marking").length;
+  const ready = tiles.filter((t) => t.rawDataUrl).length;
   const markedCount = tiles.filter((t) => t.markedDataUrl).length;
+  const noMapCount = tiles.filter((t) => t.mark && !t.mark.visible).length;
   const total = tiles.length;
   const canMark = !!parcel && ready > 0 && !markBusy && !renderBusy;
 
@@ -224,7 +242,10 @@ export function AerialGallery({
               <span>
                 {total} page{total === 1 ? "" : "s"} rendered
                 {markedCount > 0 && (
-                  <span className="ml-2 text-muted">· {markedCount} marked</span>
+                  <span className="ml-2 text-muted">
+                    · {markedCount} with boundary
+                    {noMapCount > 0 && ` · ${noMapCount} no map`}
+                  </span>
                 )}
               </span>
             ) : (
@@ -268,7 +289,7 @@ export function AerialGallery({
               tile={tile}
               onDownload={() => downloadTile(tile)}
               onMark={() => markOne(i)}
-              canMark={!!parcel && tile.status !== "marking"}
+              canMark={!!parcel && tile.status !== "marking" && !!tile.rawDataUrl}
             />
           ))}
         </div>
@@ -289,7 +310,7 @@ function TileView({
   canMark: boolean;
 }) {
   const displayUrl = tile.markedDataUrl ?? tile.rawDataUrl;
-  const conf = tile.mark?.confidence ?? null;
+  const mark = tile.mark;
   return (
     <div className="overflow-hidden rounded-xl border border-border bg-background">
       <div className="relative aspect-[4/3] w-full bg-foreground/[0.04]">
@@ -311,14 +332,12 @@ function TileView({
             marking…
           </div>
         )}
-        {tile.mark && (
+        {mark && (
           <div className="absolute right-2 top-2 rounded-full bg-background/90 px-2 py-0.5 text-[10px] font-semibold shadow">
-            {tile.mark.visible ? (
-              <span className="text-brand">
-                conf {(conf! * 100).toFixed(0)}%
-              </span>
+            {mark.visible ? (
+              <span className="text-brand">boundary · {(mark.confidence * 100).toFixed(0)}%</span>
             ) : (
-              <span className="text-muted">not visible</span>
+              <span className="text-muted">no map</span>
             )}
           </div>
         )}
@@ -332,7 +351,7 @@ function TileView({
               disabled={!canMark}
               className="text-[11px] text-muted underline-offset-2 hover:text-foreground hover:underline disabled:opacity-40"
             >
-              {tile.markedDataUrl ? "Re-mark" : "Mark"}
+              {tile.markedDataUrl ? "Re-mark" : mark && !mark.visible ? "Re-check" : "Mark"}
             </button>
             <button
               onClick={onDownload}
@@ -348,14 +367,12 @@ function TileView({
             📄 {tile.pageText.slice(0, 120)}
           </div>
         )}
-        {tile.mark?.rationale && (
-          <div className="mt-1 line-clamp-2 text-[10px] text-muted" title={tile.mark.rationale}>
-            {tile.mark.rationale}
+        {mark?.rationale && (
+          <div className="mt-1 line-clamp-2 text-[10px] text-muted" title={mark.rationale}>
+            {mark.rationale}
           </div>
         )}
-        {tile.error && (
-          <div className="mt-1 text-[10px] text-error">{tile.error}</div>
-        )}
+        {tile.error && <div className="mt-1 text-[10px] text-error">{tile.error}</div>}
       </div>
     </div>
   );

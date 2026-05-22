@@ -13,19 +13,23 @@ export type ParcelLookupResult = {
 };
 
 export function AddressInput({
+  address,
+  setAddress,
   onResult,
-  initialAddress = "",
+  busy,
+  setBusy,
 }: {
+  address: string;
+  setAddress: (a: string) => void;
   onResult: (r: ParcelLookupResult) => void;
-  initialAddress?: string;
+  busy: boolean;
+  setBusy: (b: boolean) => void;
 }) {
-  const [address, setAddress] = useState(initialAddress);
-  const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   async function submit(e?: React.FormEvent) {
     e?.preventDefault();
-    if (!address.trim()) return;
+    if (!address.trim() || busy) return;
     setBusy(true);
     setErr(null);
     try {
