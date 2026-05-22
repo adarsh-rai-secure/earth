@@ -4,18 +4,23 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { canvasToDataUrl, composeMarkedDataUrl, downsampleDataUrl } from "@/lib/canvas-mark";
 import { extractAddressCandidates } from "@/lib/extract-addresses";
 import { getPageCount, renderPdfToCanvases } from "@/lib/pdf-render";
+import { DEFAULT_VISION_MODEL_ID } from "@/lib/vision-models";
 import type { ParcelLookupResult } from "@/app/components/AddressInput";
+import { VisionModelPicker } from "@/app/components/VisionModelPicker";
+import { PageDetailEditor, type EditorTile } from "@/app/components/PageDetailEditor";
 
 type Tile = {
   pageIndex: number;
   rawDataUrl: string | null;
   markedDataUrl: string | null;
   pageText: string;
+  polygon: Array<[number, number]>;
   status: "pending" | "rendering" | "ready" | "marking" | "error";
   mark?: {
     visible: boolean;
     confidence: number;
     rationale: string;
+    modelUsed: string;
   };
   error?: string;
 };
@@ -40,19 +45,20 @@ export function AerialGallery({
   const [renderBusy, setRenderBusy] = useState(false);
   const [markBusy, setMarkBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [model, setModel] = useState<string>(DEFAULT_VISION_MODEL_ID);
+  const [editorOpenIdx, setEditorOpenIdx] = useState<number | null>(null);
   const cancelRef = useRef(false);
 
-  // Mirror tiles into a ref so async workers can read fresh state without setTiles-as-read hack.
   const tilesRef = useRef<Tile[]>([]);
   useEffect(() => {
     tilesRef.current = tiles;
   }, [tiles]);
 
-  // Render pages on file change
   useEffect(() => {
     cancelRef.current = false;
     setTiles([]);
     setErr(null);
+    setEditorOpenIdx(null);
     if (!file) return;
     setRenderBusy(true);
 
@@ -64,6 +70,7 @@ export function AerialGallery({
           rawDataUrl: null,
           markedDataUrl: null,
           pageText: "",
+          polygon: [],
           status: "pending",
         }));
         setTiles(initial);
@@ -78,6 +85,7 @@ export function AerialGallery({
               rawDataUrl,
               markedDataUrl: null,
               pageText: page.pageText,
+              polygon: [],
               status: "ready",
             };
             return next;
@@ -95,7 +103,6 @@ export function AerialGallery({
     };
   }, [file]);
 
-  // Emit address candidates derived from page text whenever it changes
   const candidates = useMemo(() => {
     if (tiles.length === 0) return [];
     return extractAddressCandidates(tiles.map((t) => t.pageText));
@@ -135,15 +142,18 @@ export function AerialGallery({
             parcel: parcel.parcel,
             address: parcel.addressNormalized,
             referenceImageDataUrl: referenceImageDataUrl ?? null,
+            model,
           }),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data?.error ?? `HTTP ${res.status}`);
 
+        const polygon =
+          Array.isArray(data.pixelPolygon) && data.pixelPolygon.length >= 3
+            ? (data.pixelPolygon as Array<[number, number]>)
+            : [];
         const markedDataUrl =
-          data.visible && Array.isArray(data.pixelPolygon) && data.pixelPolygon.length >= 3
-            ? await composeMarkedDataUrl(raw, data.pixelPolygon)
-            : null;
+          data.visible && polygon.length >= 3 ? await composeMarkedDataUrl(raw, polygon) : null;
 
         setTiles((prev) => {
           const next = [...prev];
@@ -151,11 +161,13 @@ export function AerialGallery({
             next[idx] = {
               ...next[idx],
               markedDataUrl,
+              polygon,
               status: "ready",
               mark: {
                 visible: Boolean(data.visible),
                 confidence: Number(data.confidence ?? 0),
                 rationale: String(data.rationale ?? ""),
+                modelUsed: String(data.modelUsed ?? model),
               },
             };
           }
@@ -170,7 +182,7 @@ export function AerialGallery({
         });
       }
     },
-    [parcel]
+    [parcel, referenceImageDataUrl, model]
   );
 
   const markAll = useCallback(async () => {
@@ -219,6 +231,43 @@ export function AerialGallery({
     }
   }, [tiles, downloadTile]);
 
+  const openEditor = useCallback((idx: number) => {
+    const t = tilesRef.current[idx];
+    if (!t?.rawDataUrl) return;
+    setEditorOpenIdx(idx);
+  }, []);
+
+  const navigateEditor = useCallback((direction: -1 | 1) => {
+    setEditorOpenIdx((current) => {
+      if (current === null) return null;
+      const total = tilesRef.current.length;
+      let next = current + direction;
+      // skip pages without a rendered image
+      while (next >= 0 && next < total && !tilesRef.current[next]?.rawDataUrl) {
+        next += direction;
+      }
+      if (next < 0 || next >= total) return current;
+      return next;
+    });
+  }, []);
+
+  const saveFromEditor = useCallback((updated: EditorTile) => {
+    setTiles((prev) => {
+      const next = [...prev];
+      const idx = updated.pageIndex;
+      if (next[idx]) {
+        next[idx] = {
+          ...next[idx],
+          polygon: updated.polygon,
+          markedDataUrl: updated.markedDataUrl,
+          mark: updated.mark,
+          status: "ready",
+        };
+      }
+      return next;
+    });
+  }, []);
+
   if (!file) return null;
 
   const ready = tiles.filter((t) => t.rawDataUrl).length;
@@ -227,9 +276,21 @@ export function AerialGallery({
   const total = tiles.length;
   const canMark = !!parcel && ready > 0 && !markBusy && !renderBusy;
 
+  const editorTile: EditorTile | null =
+    editorOpenIdx !== null && tiles[editorOpenIdx]?.rawDataUrl
+      ? {
+          pageIndex: tiles[editorOpenIdx].pageIndex,
+          rawDataUrl: tiles[editorOpenIdx].rawDataUrl!,
+          markedDataUrl: tiles[editorOpenIdx].markedDataUrl,
+          pageText: tiles[editorOpenIdx].pageText,
+          polygon: tiles[editorOpenIdx].polygon,
+          mark: tiles[editorOpenIdx].mark,
+        }
+      : null;
+
   return (
     <div className="rounded-2xl border border-border bg-card p-5">
-      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+      <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
         <div>
           <div className="text-xs font-semibold uppercase tracking-wider text-muted">
             Aerial timeline
@@ -262,11 +323,12 @@ export function AerialGallery({
           )}
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <VisionModelPicker value={model} onChange={setModel} disabled={markBusy} compact />
           <button
             onClick={markAll}
             disabled={!canMark}
             className="inline-flex h-9 items-center rounded-full bg-brand px-4 text-xs font-medium text-white transition-colors hover:bg-brand-hover disabled:cursor-not-allowed disabled:opacity-50"
-            title={!parcel ? "Select a property first" : "Sends each page to Claude Sonnet 4.5 (vision) to find the parcel"}
+            title={!parcel ? "Select a property first" : "Sends each page to the selected vision model"}
           >
             {markBusy ? `Marking… ${markedCount}/${total}` : `Mark all ${total} pages`}
           </button>
@@ -292,10 +354,27 @@ export function AerialGallery({
               tile={tile}
               onDownload={() => downloadTile(tile)}
               onMark={() => markOne(i)}
+              onOpen={() => openEditor(i)}
               canMark={!!parcel && tile.status !== "marking" && !!tile.rawDataUrl}
             />
           ))}
         </div>
+      )}
+
+      {editorTile && parcel && (
+        <PageDetailEditor
+          tile={editorTile}
+          totalPages={tiles.length}
+          parcel={parcel}
+          referenceImageDataUrl={referenceImageDataUrl ?? null}
+          defaultModel={model}
+          baseFilename={baseFilename}
+          onSave={(updated) => {
+            saveFromEditor(updated);
+          }}
+          onClose={() => setEditorOpenIdx(null)}
+          onNavigate={navigateEditor}
+        />
       )}
     </div>
   );
@@ -305,46 +384,63 @@ function TileView({
   tile,
   onDownload,
   onMark,
+  onOpen,
   canMark,
 }: {
   tile: Tile;
   onDownload: () => void;
   onMark: () => void;
+  onOpen: () => void;
   canMark: boolean;
 }) {
   const displayUrl = tile.markedDataUrl ?? tile.rawDataUrl;
   const mark = tile.mark;
   return (
-    <div className="overflow-hidden rounded-xl border border-border bg-background">
-      <div className="relative aspect-[4/3] w-full bg-foreground/[0.04]">
-        {displayUrl ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            src={displayUrl}
-            alt={`Aerial page ${tile.pageIndex + 1}`}
-            className="h-full w-full object-contain"
-            loading="lazy"
-          />
-        ) : (
-          <div className="flex h-full items-center justify-center text-xs text-muted">
-            {tile.status === "pending" ? "queued" : "rendering…"}
-          </div>
-        )}
-        {tile.status === "marking" && (
-          <div className="absolute inset-0 flex items-center justify-center bg-background/70 text-xs text-foreground">
-            marking…
-          </div>
-        )}
-        {mark && (
-          <div className="absolute right-2 top-2 rounded-full bg-background/90 px-2 py-0.5 text-[10px] font-semibold shadow">
-            {mark.visible ? (
-              <span className="text-brand">boundary · {(mark.confidence * 100).toFixed(0)}%</span>
-            ) : (
-              <span className="text-muted">no map</span>
-            )}
-          </div>
-        )}
-      </div>
+    <div className="overflow-hidden rounded-xl border border-border bg-background transition-colors hover:border-foreground/30">
+      <button
+        type="button"
+        onClick={onOpen}
+        disabled={!displayUrl}
+        className="block w-full text-left disabled:cursor-default"
+        title={displayUrl ? "Open page editor" : "Page not rendered yet"}
+      >
+        <div className="relative aspect-[4/3] w-full bg-foreground/[0.04]">
+          {displayUrl ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={displayUrl}
+              alt={`Aerial page ${tile.pageIndex + 1}`}
+              className="h-full w-full object-contain"
+              loading="lazy"
+            />
+          ) : (
+            <div className="flex h-full items-center justify-center text-xs text-muted">
+              {tile.status === "pending" ? "queued" : "rendering…"}
+            </div>
+          )}
+          {tile.status === "marking" && (
+            <div className="absolute inset-0 flex items-center justify-center bg-background/70 text-xs text-foreground">
+              marking…
+            </div>
+          )}
+          {mark && (
+            <div className="absolute right-2 top-2 rounded-full bg-background/90 px-2 py-0.5 text-[10px] font-semibold shadow">
+              {mark.visible ? (
+                <span className="text-brand">boundary · {(mark.confidence * 100).toFixed(0)}%</span>
+              ) : (
+                <span className="text-muted">no map</span>
+              )}
+            </div>
+          )}
+          {displayUrl && (
+            <div className="absolute inset-x-0 bottom-0 flex justify-center bg-gradient-to-t from-foreground/40 to-transparent pb-2 pt-6 opacity-0 transition-opacity group-hover:opacity-100 hover:opacity-100">
+              <span className="rounded-full bg-background/90 px-3 py-0.5 text-[10px] font-medium shadow">
+                Open editor →
+              </span>
+            </div>
+          )}
+        </div>
+      </button>
       <div className="px-3 pb-2 pt-2">
         <div className="flex items-center justify-between">
           <span className="text-xs font-medium">Page {tile.pageIndex + 1}</span>
