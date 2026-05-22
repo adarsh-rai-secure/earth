@@ -65,9 +65,9 @@ export function AddressInput({
         <button
           type="submit"
           disabled={busy || !address.trim()}
-          className="inline-flex h-10 items-center rounded-full bg-brand px-5 text-sm font-medium text-white transition-colors hover:bg-brand-hover disabled:cursor-not-allowed disabled:opacity-60"
+          className="inline-flex h-10 shrink-0 items-center rounded-full bg-brand px-5 text-sm font-medium text-white transition-colors hover:bg-brand-hover disabled:cursor-not-allowed disabled:opacity-60"
         >
-          {busy ? "Looking up…" : "Look up parcel"}
+          {busy ? "Looking up…" : "Look up"}
         </button>
       </div>
       {err && <p className="mt-2 text-xs text-error">{err}</p>}

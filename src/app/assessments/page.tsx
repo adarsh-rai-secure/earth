@@ -25,7 +25,7 @@ export default function AssessmentsPage() {
   const [referenceImage, setReferenceImage] = useState<string | null>(null);
   const [confirmBusy, setConfirmBusy] = useState(false);
   const [confirmErr, setConfirmErr] = useState<string | null>(null);
-  const [tileType, setTileType] = useState<TileType>("standard");
+  const [tileType, setTileType] = useState<TileType>("satellite");
   const [dragging, setDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dropZoneRef = useRef<HTMLDivElement>(null);
@@ -137,10 +137,10 @@ export default function AssessmentsPage() {
             />
             <button
               onClick={triggerPdfPicker}
-              className="inline-flex w-full items-center justify-center gap-2 rounded-full border border-dashed border-border bg-card px-4 py-2 text-xs font-medium text-muted hover:border-brand hover:text-brand"
+              className="inline-flex w-full items-center justify-center gap-2 rounded-full bg-brand px-5 py-3 text-sm font-medium text-white shadow-sm transition-colors hover:bg-brand-hover"
             >
               <span aria-hidden>📄</span>
-              Or auto-fill from a PDF
+              Auto-fill from PDF
             </button>
 
             {pdfCandidates.length > 0 && (
