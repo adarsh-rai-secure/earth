@@ -26,11 +26,13 @@ const MARK_INPUT_MAX_SIDE = 1024;
 export function AerialGallery({
   file,
   parcel,
+  referenceImageDataUrl,
   baseFilename,
   onAddressCandidates,
 }: {
   file: File | null;
   parcel: ParcelLookupResult | null;
+  referenceImageDataUrl?: string | null;
   baseFilename?: string;
   onAddressCandidates?: (candidates: string[]) => void;
 }) {
@@ -132,6 +134,7 @@ export function AerialGallery({
             imageDataUrl: downsampled,
             parcel: parcel.parcel,
             address: parcel.addressNormalized,
+            referenceImageDataUrl: referenceImageDataUrl ?? null,
           }),
         });
         const data = await res.json();

@@ -14,7 +14,7 @@ export type MarkResult = {
   modelUsed: string;
 };
 
-const SYSTEM_PROMPT = `You are a geospatial vision analyst. You receive one aerial photograph (often historical, sometimes labeled, sometimes black and white) along with a known parcel boundary in WGS84 lat/lng coordinates and an address. Your job is to identify where that parcel's footprint appears in the photograph and return its outline in normalized image coordinates.
+const SYSTEM_PROMPT_BASIC = `You are a geospatial vision analyst. You receive one aerial photograph (often historical, sometimes labeled, sometimes black and white) along with a known parcel boundary in WGS84 lat/lng coordinates and an address. Your job is to identify where that parcel's footprint appears in the photograph and return its outline in normalized image coordinates.
 
 Return strict JSON with this exact shape, no prose:
 
@@ -29,6 +29,31 @@ Rules:
 - pixelPolygon coordinates are NORMALIZED to the image: each x,y is between 0 and 1 (0,0 = top-left, 1,1 = bottom-right).
 - Return 4 to 12 polygon vertices in order around the parcel.
 - If you cannot confidently identify the parcel in this specific photograph (out of frame, too blurry, image is a non-aerial like a map index or text page), set visible=false, pixelPolygon=[], and explain in rationale.
+- confidence is your own honest 0..1 estimate. <0.5 means "guessing", >0.8 means "I see clear visual evidence".
+- rationale is one or two sentences in plain English. No markdown, no JSON inside.`;
+
+const SYSTEM_PROMPT_WITH_REFERENCE = `You are a geospatial vision analyst. You receive TWO images and a parcel boundary in WGS84 lat/lng plus an address.
+
+Image A is the REFERENCE: a current-day OSM map view of the subject parcel with its boundary drawn in red. Treat it as the ground-truth shape and orientation of the parcel.
+
+Image B is the AERIAL: a historical or current aerial photograph that may or may not contain the same parcel. The aerial may be at a different scale, rotation, time period, or framing than the reference.
+
+Your job is to find the same parcel shape (from Image A) inside Image B and return its pixel outline in normalized coordinates.
+
+Return strict JSON with this exact shape, no prose:
+
+{
+  "visible": boolean,
+  "pixelPolygon": [[x, y], ...],
+  "confidence": number,
+  "rationale": string
+}
+
+Rules:
+- pixelPolygon coordinates are NORMALIZED to Image B (the aerial): each x,y is between 0 and 1 (0,0 = top-left, 1,1 = bottom-right).
+- Return 4 to 12 polygon vertices in order around the parcel, mirroring the shape in Image A as closely as orientation/scale of Image B allows.
+- The polygon should outline the WHOLE parcel (lot lines), not just one building inside it. The reference image tells you how big the parcel is relative to its surroundings.
+- If you cannot confidently identify the parcel in this specific aerial (out of frame, too blurry, image is a non-aerial like a map index or text page, no recognizable landmarks), set visible=false, pixelPolygon=[], confidence=0, explain why in rationale.
 - confidence is your own honest 0..1 estimate. <0.5 means "guessing", >0.8 means "I see clear visual evidence".
 - rationale is one or two sentences in plain English. No markdown, no JSON inside.`;
 
@@ -76,24 +101,36 @@ export async function markParcelInImage(args: {
   imageDataUrl: string;
   parcel: Feature<Polygon | MultiPolygon>;
   address: string | null;
+  referenceImageDataUrl?: string | null;
   model?: string;
 }): Promise<MarkResult> {
   const key = process.env.OPENROUTER_API_KEY;
   if (!key) throw new Error("OPENROUTER_API_KEY is not set");
 
   const model = args.model ?? DEFAULT_VISION_MODEL;
+  const useRef = !!args.referenceImageDataUrl;
+
+  const userContent: Array<
+    | { type: "text"; text: string }
+    | { type: "image_url"; image_url: { url: string } }
+  > = useRef
+    ? [
+        { type: "text", text: `Image A (reference — parcel shape on a current map):` },
+        { type: "image_url", image_url: { url: args.referenceImageDataUrl! } },
+        { type: "text", text: `Image B (the aerial photograph to analyze):` },
+        { type: "image_url", image_url: { url: args.imageDataUrl } },
+        { type: "text", text: buildUserText(args.parcel, args.address) },
+      ]
+    : [
+        { type: "text", text: buildUserText(args.parcel, args.address) },
+        { type: "image_url", image_url: { url: args.imageDataUrl } },
+      ];
 
   const body = {
     model,
     messages: [
-      { role: "system" as const, content: SYSTEM_PROMPT },
-      {
-        role: "user" as const,
-        content: [
-          { type: "text" as const, text: buildUserText(args.parcel, args.address) },
-          { type: "image_url" as const, image_url: { url: args.imageDataUrl } },
-        ],
-      },
+      { role: "system" as const, content: useRef ? SYSTEM_PROMPT_WITH_REFERENCE : SYSTEM_PROMPT_BASIC },
+      { role: "user" as const, content: userContent },
     ],
     max_tokens: 1500,
     temperature: 0.1,

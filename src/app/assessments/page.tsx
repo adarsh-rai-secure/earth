@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import { AddressInput, type ParcelLookupResult } from "@/app/components/AddressInput";
 import { AerialGallery } from "@/app/components/AerialGallery";
@@ -20,10 +20,20 @@ export default function AssessmentsPage() {
   const [lookupBusy, setLookupBusy] = useState(false);
   const [aerialFile, setAerialFile] = useState<File | null>(null);
   const [pdfCandidates, setPdfCandidates] = useState<string[]>([]);
+  const [autoLookupTriedFor, setAutoLookupTriedFor] = useState<string | null>(null);
+  const [referenceImage, setReferenceImage] = useState<string | null>(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
+  const [confirmErr, setConfirmErr] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Programmatic lookup — used when user clicks a PDF candidate chip.
+  // Reset reference image whenever the parcel changes (or clears).
+  useEffect(() => {
+    setReferenceImage(null);
+    setConfirmErr(null);
+  }, [parcel?.parcel]);
+
+  // Programmatic lookup — used by candidate chips AND by the PDF auto-lookup effect below.
   const lookupAddress = useCallback(async (addr: string) => {
     setAddress(addr);
     setLookupBusy(true);
@@ -40,6 +50,40 @@ export default function AssessmentsPage() {
     }
   }, []);
 
+  // PDF auto-lookup: when candidates first arrive and we have no parcel yet,
+  // fire the lookup on the top candidate automatically. We track which list we've
+  // tried so we don't loop or re-fire on re-renders.
+  useEffect(() => {
+    if (parcel) return;
+    if (lookupBusy) return;
+    if (pdfCandidates.length === 0) return;
+    const top = pdfCandidates[0];
+    const sig = pdfCandidates.join("|");
+    if (autoLookupTriedFor === sig) return;
+    setAutoLookupTriedFor(sig);
+    void lookupAddress(top);
+  }, [pdfCandidates, parcel, lookupBusy, autoLookupTriedFor, lookupAddress]);
+
+  async function confirmParcel() {
+    if (!parcel || confirmBusy) return;
+    setConfirmBusy(true);
+    setConfirmErr(null);
+    try {
+      const res = await fetch("/api/reference", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ parcel: parcel.parcel, size: 640 }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error ?? `HTTP ${res.status}`);
+      setReferenceImage(data.dataUrl as string);
+    } catch (e) {
+      setConfirmErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setConfirmBusy(false);
+    }
+  }
+
   function pickFile(f: File | undefined | null) {
     if (!f) return;
     setAerialFile(f);
@@ -53,9 +97,8 @@ export default function AssessmentsPage() {
           Parcel boundary &amp; aerial timeline
         </h1>
         <p className="mt-2 text-sm text-muted">
-          Type an address to pull the subject parcel boundary, then drop a multi-page aerial PDF to
-          render each page as a PNG and have Claude Sonnet 4.5 draw the parcel boundary onto each
-          aerial.
+          Type an address, or drop a multi-page aerial PDF and let us pull the address from it.
+          Confirm the parcel, then have Claude Sonnet 4.5 draw the parcel boundary onto each aerial.
         </p>
       </div>
 
@@ -101,15 +144,33 @@ export default function AssessmentsPage() {
                   ))}
                 </div>
                 <p className="mt-2 text-[11px] text-muted">
-                  Click a chip to look up the parcel for that address.
+                  Top candidate auto-loaded when you dropped the PDF. Click another to switch.
                 </p>
               </div>
             )}
 
             {parcel && (
               <div className="rounded-2xl border border-border bg-card p-4 text-sm">
-                <div className="text-xs uppercase tracking-wider text-muted">Found</div>
-                <div className="mt-1 font-medium leading-snug">{parcel.addressNormalized}</div>
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <div className="text-xs uppercase tracking-wider text-muted">Found</div>
+                    <div className="mt-1 font-medium leading-snug">{parcel.addressNormalized}</div>
+                  </div>
+                  {!referenceImage ? (
+                    <button
+                      onClick={confirmParcel}
+                      disabled={confirmBusy}
+                      className="inline-flex h-8 shrink-0 items-center rounded-full bg-brand px-3 text-[11px] font-medium text-white hover:bg-brand-hover disabled:cursor-not-allowed disabled:opacity-60"
+                      title="Locks in this parcel and saves the Regrid view as a reference image for the vision model"
+                    >
+                      {confirmBusy ? "Confirming…" : "Confirm parcel"}
+                    </button>
+                  ) : (
+                    <span className="inline-flex h-7 shrink-0 items-center gap-1 rounded-full bg-success/15 px-3 text-[10px] font-semibold text-brand">
+                      ✓ Confirmed
+                    </span>
+                  )}
+                </div>
                 <dl className="mt-3 grid grid-cols-2 gap-y-2 text-xs">
                   <dt className="text-muted">APN</dt>
                   <dd className="font-mono">{parcel.apn ?? "—"}</dd>
@@ -120,6 +181,20 @@ export default function AssessmentsPage() {
                     {parcel.centroid.lat.toFixed(5)}, {parcel.centroid.lng.toFixed(5)}
                   </dd>
                 </dl>
+                {confirmErr && <p className="mt-2 text-[11px] text-error">{confirmErr}</p>}
+                {referenceImage && (
+                  <div className="mt-3">
+                    <div className="text-[10px] uppercase tracking-wider text-muted">
+                      Reference image (sent to vision)
+                    </div>
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={referenceImage}
+                      alt="Parcel reference image"
+                      className="mt-1 w-full rounded-lg border border-border"
+                    />
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -135,6 +210,7 @@ export default function AssessmentsPage() {
               onClick={() => {
                 setAerialFile(null);
                 setPdfCandidates([]);
+                setAutoLookupTriedFor(null);
                 if (fileInputRef.current) fileInputRef.current.value = "";
               }}
               className="text-xs text-muted underline-offset-2 hover:text-foreground hover:underline"
@@ -170,20 +246,32 @@ export default function AssessmentsPage() {
             />
             <p className="text-sm font-medium">Drop a multi-page aerial PDF here, or click to choose</p>
             <p className="mt-1 text-xs text-muted">
-              Renders in your browser. After rendering, Claude Sonnet 4.5 draws the parcel boundary
-              onto each aerial that contains a map.
+              We extract the subject address from the PDF text and pre-load the parcel for you.
             </p>
           </div>
         ) : (
           <div className="space-y-4">
-            <div className="rounded-2xl border border-border bg-card p-4 text-sm">
-              <div className="text-xs uppercase tracking-wider text-muted">Selected PDF</div>
-              <div className="mt-1 font-medium">{aerialFile.name}</div>
-              <div className="text-xs text-muted">{(aerialFile.size / 1_048_576).toFixed(2)} MB</div>
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-border bg-card p-4 text-sm">
+              <div>
+                <div className="text-xs uppercase tracking-wider text-muted">Selected PDF</div>
+                <div className="mt-1 font-medium">{aerialFile.name}</div>
+                <div className="text-xs text-muted">{(aerialFile.size / 1_048_576).toFixed(2)} MB</div>
+              </div>
+              {parcel && !referenceImage && (
+                <span className="rounded-full bg-warn/15 px-3 py-1 text-[11px] text-warn">
+                  Confirm the parcel for higher-quality marking
+                </span>
+              )}
+              {referenceImage && (
+                <span className="rounded-full bg-success/15 px-3 py-1 text-[11px] text-brand">
+                  Reference image active — vision will shape-match against it
+                </span>
+              )}
             </div>
             <AerialGallery
               file={aerialFile}
               parcel={parcel}
+              referenceImageDataUrl={referenceImage}
               baseFilename={aerialFile.name}
               onAddressCandidates={setPdfCandidates}
             />

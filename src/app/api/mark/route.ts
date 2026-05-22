@@ -20,6 +20,7 @@ type Body = {
   imageDataUrl?: string;
   parcel?: Feature<Polygon | MultiPolygon>;
   address?: string | null;
+  referenceImageDataUrl?: string | null;
   model?: string;
 };
 
@@ -40,6 +41,7 @@ export async function POST(req: NextRequest) {
       imageDataUrl: body.imageDataUrl,
       parcel: body.parcel,
       address: body.address ?? null,
+      referenceImageDataUrl: body.referenceImageDataUrl ?? null,
       model: body.model,
     });
 
