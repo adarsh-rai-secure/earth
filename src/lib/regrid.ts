@@ -35,12 +35,23 @@ function ensureToken(): string {
   return t.trim();
 }
 
-function parseFeature(fc: unknown): RegridParcel {
-  if (!fc || typeof fc !== "object" || !("features" in fc)) {
+function parseFeature(raw: unknown): RegridParcel {
+  // Regrid v2 wraps the FeatureCollection inside a `parcels` key:
+  //   { parcels: { type: "FeatureCollection", features: [ ... ] } }
+  // Tolerate both shapes in case the wrapper changes.
+  if (!raw || typeof raw !== "object") {
+    throw new Error("Regrid: empty response");
+  }
+  const obj = raw as Record<string, unknown>;
+  const fc = (obj.parcels && typeof obj.parcels === "object" ? obj.parcels : obj) as Record<
+    string,
+    unknown
+  >;
+  const features = Array.isArray(fc.features) ? (fc.features as unknown[]) : null;
+  if (!features) {
     throw new Error("Regrid: unexpected response shape (no features)");
   }
-  const features = (fc as { features: unknown[] }).features;
-  if (!Array.isArray(features) || features.length === 0) {
+  if (features.length === 0) {
     throw new Error("Regrid: no parcel found for this location");
   }
   const feature = features[0] as RegridParcel["feature"];
